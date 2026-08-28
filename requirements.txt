@@ -4,5 +4,6 @@ numpy
 scipy
 pyqtgraph
 matplotlib
+pandas
 EMD-signal
 PyWavelets

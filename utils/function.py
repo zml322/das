@@ -16,6 +16,9 @@ from scipy.signal import detrend
 
 from utils.widget import MyPlotWidget
 
+DAS_FILE_FILTER = 'DAS data (*.dat *.bin)'
+DAS_FILE_SUFFIXES = ('.dat', '.bin')
+
 
 def printError(err: Union[Exception, str]) -> None:
     """

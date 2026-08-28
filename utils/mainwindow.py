@@ -29,6 +29,7 @@ from .classes.snr import SNRCalculator
 from .classes.spectrum import SpectrumHandler
 from .classes.wavelet import DWTHandler, CWTHandler
 from .classes.wavelet_packet import DWPTHandler
+from .bin_reader import bin2numpy, read_bin_header
 from .function import *
 from .widget import *
 
@@ -764,7 +765,7 @@ class MainWindow(QMainWindow):
 
         """
         self.file_path_line_edit.setText(self.file_path)
-        files = [f for f in os.listdir(self.file_path) if f.endswith('.dat')]
+        files = [f for f in os.listdir(self.file_path) if f.lower().endswith(DAS_FILE_SUFFIXES)]
         self.files_table_widget.setRowCount(len(files))  # 有多少个文件就显示多少行
         for i in range(len(files)):
             table_widget_item = QTableWidgetItem(files[i])
@@ -843,7 +844,7 @@ class MainWindow(QMainWindow):
         Returns:
 
         """
-        file_names = QFileDialog.getOpenFileNames(self, '导入', '', 'DAS data (*.dat)')[0]  # 打开多个.dat文件
+        file_names = QFileDialog.getOpenFileNames(self, '导入', '', DAS_FILE_FILTER)[0]  # 打开多个数据文件
         if file_names:
             self.file_names = file_names
             self.file_path = os.path.dirname(self.file_names[0])
@@ -863,90 +864,119 @@ class MainWindow(QMainWindow):
             return list(map(str, map(int, s[:5]))) + [str(s[5])]
 
         time, data = [], []
-        raw_data = np.fromfile(os.path.join(self.file_path, self.file_names[0]), dtype='<f4')
-        if self.is_scouter:
-            channels_num = int(raw_data[16])  # 传感点数
-            for file in self.file_names:
-                raw_data = np.fromfile(os.path.join(self.file_path, file), dtype='<f4')
-                time.append(raw_data[:6])  # GPS时间
-                data.append(raw_data[64:].reshape(channels_num, -1, order='F'))
-            acquisition_modes = {
-                1.: 'CNTE 连续模式',
-                2.: 'PTRI 预触发模式',
-                3.: 'WTRI 等待触发模式'
-            }
+        suffixes = {self.dataFileSuffix(file) for file in self.file_names}
+        if len(suffixes) != 1:
+            raise ValueError('一次只能读取同一种格式的数据文件。')
 
-            fiber_types = {
-                1.: 'SMF 单模光纤',
-                2.: 'MMF 多模光纤',
-                3.: 'MSF 微结构光纤'
-            }
-            acquisition_mode = raw_data[6]  # 采集模式
-            fiber_type = raw_data[7]  # 光纤类型
-            physical_fiber_length = raw_data[8]  # 光纤长度，m
-            refractive_index = raw_data[9]  # 反射率
-            sampling_rate = int(raw_data[10])  # 采样率
-            pulse_width = raw_data[11]  # 脉冲宽度，ns
-            gauge_length = raw_data[12]  # 道间距，m
-            spatial_resolution = raw_data[13]  # 空间分辨率，m
-            start_distance = raw_data[14]  # 开始位置，m
-            stop_distance = raw_data[15]  # 结束位置，m
-            sampling_time = int(raw_data[17])  # 连续采集时间，即一个文件时长，s
-            p = raw_data[18]  # P 系数
-            time_decimation = raw_data[19]  # 时间系数
-            number = raw_data[20]  # 滑动系数
-            window = raw_data[21]  # 窗类型
-            cutoff = raw_data[22]  # 截止阈值
-            gain1 = raw_data[23]  # 增益 1
-            gain2 = raw_data[24]  # 增益 2
-            optical_power = raw_data[25]  # 光功率
-            scan_threshold = raw_data[26]  # 扫描阈值
-            trigger_level = raw_data[27]  # 触发脉宽阈值，ns
-            acquisition_time = raw_data[28]  # 触发采集时间，s
-            trigger_interval = raw_data[29]  # 触发间隔，s
+        suffix = suffixes.pop()
+        first_file_path = self.dataFilePath(self.file_names[0])
+        if suffix == '.bin':
+            first_header, sampling_time, channels_num, _ = read_bin_header(first_file_path)
+            sampling_rate = self.binSamplingRate(first_header)
+            for file in self.file_names:
+                file_path = self.dataFilePath(file)
+                header, file_sampling_time, file_channels_num, _ = read_bin_header(file_path)
+                if file_channels_num != channels_num:
+                    raise ValueError(f'{file_path}: 通道数不一致，期望 {channels_num}，实际 {file_channels_num}')
+                time.append(header[:6])  # GPS时间
+                data.append(bin2numpy(file_path, 0, channels_num).T)
 
             self.acquisition_params = {
                 'GPS时间': f'{"-".join(f(time[0]))} 至 {"-".join(f(time[-1]))}',
-                '采集模式': f'{acquisition_modes[acquisition_mode]}',
-                '光纤类型': f'{fiber_types[fiber_type]}',
-                '光纤长度': f'{physical_fiber_length:.3f}m',
-                '反射率': f'{refractive_index:.3f}',
-                '采样频率': f'{sampling_rate}Hz',
-                '脉冲宽度': f'{pulse_width}ns',
-                '道间距': f'{gauge_length}m',
-                '空间分辨率': f'{spatial_resolution:.3f}m',
-                '测量开始位置': f'{start_distance:.3f}m',
-                '测量结束位置': f'{stop_distance:.3f}m',
-                '传感点数（通道数）': f'{channels_num}',
-                '单个文件采样点数': f'{sampling_time * sampling_rate}',
-                '计算系数 P': f'{p}',
-                '降采样时间系数': f'{time_decimation}',
-                '窗口滑动平均系数': f'{number}',
-                '窗类型': f'{window}',
-                '截止阈值': f'{cutoff:.3f}',
-                '接受增益 1': f'{gain1}',
-                '接受增益 2': f'{gain2}',
-                '输出光功率': f'{optical_power}',
-                '微结构扫描阈值': f'{scan_threshold}',
-                '触发采集模式脉冲阈值': f'{trigger_level}ns',
-                '触发采集模式采集间隔': f'{trigger_interval:.3f}s',
-                '等待出发采集模式采集时间': f'{acquisition_time}s'
-            }
-
-        else:
-            sampling_rate, channels_num = int(raw_data[6]), int(raw_data[9])  # 采样率，通道数
-            sampling_time = (len(raw_data) - 10) // channels_num
-            for file in self.file_names:
-                raw_data = np.fromfile(os.path.join(self.file_path, file), dtype='<f4')
-                time.append(raw_data[:6])  # GPS时间
-                data.append(raw_data[10:].reshape(channels_num, -1))
-
-            self.acquisition_params = {
-                'GPS时间': f'{"-".join(f(time[0]))} 至 {"-".join(f(time[-1]))}',
+                '文件格式': '.bin',
                 '采样频率': f'{sampling_rate}Hz',
                 '传感点数（通道数）': f'{channels_num}',
                 '单个文件采样点数': f'{sampling_time}',
             }
+
+        elif suffix == '.dat':
+            raw_data = np.fromfile(first_file_path, dtype='<f4')
+            if self.is_scouter:
+                channels_num = int(raw_data[16])  # 传感点数
+                for file in self.file_names:
+                    raw_data = np.fromfile(self.dataFilePath(file), dtype='<f4')
+                    time.append(raw_data[:6])  # GPS时间
+                    data.append(raw_data[64:].reshape(channels_num, -1, order='F'))
+                acquisition_modes = {
+                    1.: 'CNTE 连续模式',
+                    2.: 'PTRI 预触发模式',
+                    3.: 'WTRI 等待触发模式'
+                }
+
+                fiber_types = {
+                    1.: 'SMF 单模光纤',
+                    2.: 'MMF 多模光纤',
+                    3.: 'MSF 微结构光纤'
+                }
+                acquisition_mode = raw_data[6]  # 采集模式
+                fiber_type = raw_data[7]  # 光纤类型
+                physical_fiber_length = raw_data[8]  # 光纤长度，m
+                refractive_index = raw_data[9]  # 反射率
+                sampling_rate = int(raw_data[10])  # 采样率
+                pulse_width = raw_data[11]  # 脉冲宽度，ns
+                gauge_length = raw_data[12]  # 道间距，m
+                spatial_resolution = raw_data[13]  # 空间分辨率，m
+                start_distance = raw_data[14]  # 开始位置，m
+                stop_distance = raw_data[15]  # 结束位置，m
+                sampling_time = int(raw_data[17])  # 连续采集时间，即一个文件时长，s
+                p = raw_data[18]  # P 系数
+                time_decimation = raw_data[19]  # 时间系数
+                number = raw_data[20]  # 滑动系数
+                window = raw_data[21]  # 窗类型
+                cutoff = raw_data[22]  # 截止阈值
+                gain1 = raw_data[23]  # 增益 1
+                gain2 = raw_data[24]  # 增益 2
+                optical_power = raw_data[25]  # 光功率
+                scan_threshold = raw_data[26]  # 扫描阈值
+                trigger_level = raw_data[27]  # 触发脉宽阈值，ns
+                acquisition_time = raw_data[28]  # 触发采集时间，s
+                trigger_interval = raw_data[29]  # 触发间隔，s
+
+                self.acquisition_params = {
+                    'GPS时间': f'{"-".join(f(time[0]))} 至 {"-".join(f(time[-1]))}',
+                    '采集模式': f'{acquisition_modes[acquisition_mode]}',
+                    '光纤类型': f'{fiber_types[fiber_type]}',
+                    '光纤长度': f'{physical_fiber_length:.3f}m',
+                    '反射率': f'{refractive_index:.3f}',
+                    '采样频率': f'{sampling_rate}Hz',
+                    '脉冲宽度': f'{pulse_width}ns',
+                    '道间距': f'{gauge_length}m',
+                    '空间分辨率': f'{spatial_resolution:.3f}m',
+                    '测量开始位置': f'{start_distance:.3f}m',
+                    '测量结束位置': f'{stop_distance:.3f}m',
+                    '传感点数（通道数）': f'{channels_num}',
+                    '单个文件采样点数': f'{sampling_time * sampling_rate}',
+                    '计算系数 P': f'{p}',
+                    '降采样时间系数': f'{time_decimation}',
+                    '窗口滑动平均系数': f'{number}',
+                    '窗类型': f'{window}',
+                    '截止阈值': f'{cutoff:.3f}',
+                    '接受增益 1': f'{gain1}',
+                    '接受增益 2': f'{gain2}',
+                    '输出光功率': f'{optical_power}',
+                    '微结构扫描阈值': f'{scan_threshold}',
+                    '触发采集模式脉冲阈值': f'{trigger_level}ns',
+                    '触发采集模式采集间隔': f'{trigger_interval:.3f}s',
+                    '等待出发采集模式采集时间': f'{acquisition_time}s'
+                }
+
+            else:
+                sampling_rate, channels_num = int(raw_data[6]), int(raw_data[9])  # 采样率，通道数
+                sampling_time = (len(raw_data) - 10) // channels_num
+                for file in self.file_names:
+                    raw_data = np.fromfile(self.dataFilePath(file), dtype='<f4')
+                    time.append(raw_data[:6])  # GPS时间
+                    data.append(raw_data[10:].reshape(channels_num, -1))
+
+                self.acquisition_params = {
+                    'GPS时间': f'{"-".join(f(time[0]))} 至 {"-".join(f(time[-1]))}',
+                    '采样频率': f'{sampling_rate}Hz',
+                    '传感点数（通道数）': f'{channels_num}',
+                    '单个文件采样点数': f'{sampling_time}',
+                }
+
+        else:
+            raise ValueError(f'不支持的数据格式：{suffix}')
 
         self.time = time
         self.data = detrendData(np.concatenate(data, axis=1))  # （通道数，采样次数）
@@ -955,6 +985,31 @@ class MainWindow(QMainWindow):
         self.channels_num = channels_num
         self.sampling_times = self.data.shape[1]
         self.acquisition_params['总采样点数'] = f'{self.sampling_times}'
+
+    def dataFilePath(self, file_name):
+        """
+        获取数据文件绝对路径。
+        """
+        file_name = str(file_name)
+        return file_name if os.path.isabs(file_name) else os.path.join(self.file_path, file_name)
+
+    @staticmethod
+    def dataFileSuffix(file_name):
+        """
+        获取数据文件后缀。
+        """
+        return os.path.splitext(str(file_name))[1].lower()
+
+    def binSamplingRate(self, header):
+        """
+        从 .bin 头里读取采样率；缺失时沿用界面已有值，仍缺失则使用 1Hz。
+        """
+        sampling_rate = int(round(float(header[6]))) if len(header) > 6 and header[6] > 0 else 0
+        if sampling_rate > 0:
+            return sampling_rate
+        if self.sampling_rate_line_edit.text():
+            return int(self.sampling_rate_line_edit.text())
+        return 1
 
     def exportData(self):
         """
