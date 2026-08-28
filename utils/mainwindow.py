@@ -8,12 +8,10 @@ import ctypes
 import os.path
 import re
 import sys
-from itertools import cycle
 
 import pandas as pd
 from PyQt5 import QtMultimedia
-from PyQt5.QtCore import QUrl, QEvent
-from PyQt5.QtGui import QTransform
+from PyQt5.QtCore import QUrl, QEvent, QRectF
 from PyQt5.QtWidgets import QApplication, QMainWindow, QFileDialog, qApp, QTabWidget, QTableWidget, QAbstractItemView, \
     QTableWidgetItem, QHeaderView, QTabBar, QScrollBar, QHBoxLayout
 from matplotlib import pyplot as plt
@@ -79,6 +77,12 @@ class MainWindow(QMainWindow):
         pg.setConfigOptions(leftButtonPan=True)  # 设置可用鼠标缩放
         pg.setConfigOption('background', 'w')
         pg.setConfigOption('foreground', 'k')  # 设置界面前背景色
+
+        self.image_colormap = '灰度'
+        self.image_level_min = None
+        self.image_level_max = None
+        self.gray_scale_color_bar = None
+        self.diverging_colormaps = {'RdBu', 'seismic', 'coolwarm'}
 
         # 导出输出设置
         np.set_printoptions(threshold=sys.maxsize, linewidth=sys.maxsize)  # 设置输出时每行的长度
@@ -484,6 +488,46 @@ class MainWindow(QMainWindow):
         data_params_hbox.addWidget(number_of_channels_label)
         data_params_hbox.addWidget(self.current_channels_line_edit)
 
+        # 图像颜色控制
+        image_colormap_label = Label('图像颜色')
+        self.image_colormap_combx = ComboBox()
+        self.image_colormap_combx.addItems(['灰度', 'RdBu', 'viridis', 'plasma', 'inferno', 'magma', 'turbo',
+                                            'jet', 'seismic', 'coolwarm'])
+        self.image_colormap_combx.setCurrentText(self.image_colormap)
+        self.image_colormap_combx.currentTextChanged.connect(self.updateImageColorParams)
+
+        image_level_min_label = Label('最小值(%)')
+        self.image_level_min_line_edit = LineEdit()
+        self.image_level_min_line_edit.setFixedWidth(90)
+        self.image_level_min_line_edit.setPlaceholderText('自动')
+        self.image_level_min_line_edit.setToolTip('相对于当前图像最大绝对值的百分比，例如 -80')
+
+        image_level_max_label = Label('最大值(%)')
+        self.image_level_max_line_edit = LineEdit()
+        self.image_level_max_line_edit.setFixedWidth(90)
+        self.image_level_max_line_edit.setPlaceholderText('自动')
+        self.image_level_max_line_edit.setToolTip('相对于当前图像最大绝对值的百分比，例如 80')
+
+        image_auto_button = PushButton('自动')
+        image_auto_button.clicked.connect(self.autoImageLevels)
+
+        image_apply_button = PushButton('应用')
+        image_apply_button.clicked.connect(self.updateImageColorParams)
+
+        image_controls_hbox = QHBoxLayout()
+        image_controls_hbox.addWidget(image_colormap_label)
+        image_controls_hbox.addWidget(self.image_colormap_combx)
+        image_controls_hbox.addSpacing(10)
+        image_controls_hbox.addWidget(image_level_min_label)
+        image_controls_hbox.addWidget(self.image_level_min_line_edit)
+        image_controls_hbox.addSpacing(5)
+        image_controls_hbox.addWidget(image_level_max_label)
+        image_controls_hbox.addWidget(self.image_level_max_line_edit)
+        image_controls_hbox.addSpacing(10)
+        image_controls_hbox.addWidget(image_auto_button)
+        image_controls_hbox.addWidget(image_apply_button)
+        image_controls_hbox.addStretch(1)
+
         # 绘制灰度图
         self.plot_gray_scale_widget = MyPlotWidget('灰度图', '时间（s）', '通道', check_mouse=False)
 
@@ -526,6 +570,8 @@ class MainWindow(QMainWindow):
         # 右侧布局
         main_window_vbox.addSpacing(10)
         main_window_vbox.addLayout(data_params_hbox)
+        main_window_vbox.addSpacing(6)
+        main_window_vbox.addLayout(image_controls_hbox)
         main_window_vbox.addSpacing(10)
         main_window_vbox.addWidget(self.tab_widget)
         main_window_vbox.addSpacing(10)
@@ -662,15 +708,130 @@ class MainWindow(QMainWindow):
 
         """
         self.plot_gray_scale_widget.clear()
-
-        tr = QTransform()
-        tr.scale(1 / self.sampling_rate, 1)  # 缩放
-        tr.translate(self.sampling_times_from_num - 1, 0)  # 移动
+        title = '灰度图' if self.image_colormap == '灰度' else f'彩色图 - {self.image_colormap}'
+        self.plot_gray_scale_widget.setTitle(f'<font face="Microsoft YaHei" size="5">{title}</font>')
+        self.tab_widget.setTabText(0, title)
 
         item = pg.ImageItem()
-        item.setImage(self.data.T)
-        item.setTransform(tr)
-        self.plot_gray_scale_widget.addItem(item)
+        self.addDataImageItem(self.plot_gray_scale_widget, item, self.data, use_image_controls=True,
+                              show_color_bar=True)
+
+    def addDataImageItem(self,
+                         plot_widget: MyPlotWidget,
+                         item: pg.ImageItem,
+                         data: np.array,
+                         use_image_controls: bool = False,
+                         show_color_bar: bool = False) -> None:
+        """
+        按当前数据的实际时间长度和通道数绘制二维图，避免自动坐标轴范围过大。
+        """
+        start_time = (self.sampling_times_from_num - 1) / self.sampling_rate
+        duration = self.current_sampling_times / self.sampling_rate
+        channel_count = self.current_channels
+
+        levels = self.imageLevels(data) if use_image_controls else None
+        color_map = self.imageColorMap() if use_image_controls else None
+
+        item.setImage(data.T, autoLevels=levels is None)
+        if levels is not None:
+            item.setLevels(levels)
+        if color_map is not None:
+            item.setColorMap(color_map)
+        item.setRect(QRectF(start_time, 0, duration, channel_count))
+        plot_widget.addItem(item)
+        self.updateGrayScaleColorBar(plot_widget, item, color_map, levels, show_color_bar)
+
+        view_box = plot_widget.getViewBox()
+        view_box.setLimits(xMin=start_time, xMax=start_time + duration, yMin=0, yMax=channel_count)
+        view_box.setRange(xRange=(start_time, start_time + duration), yRange=(0, channel_count), padding=0)
+
+    def updateImageColorParams(self, *args):
+        self.image_colormap = self.image_colormap_combx.currentText()
+        try:
+            self.image_level_min = self.parseOptionalFloat(self.image_level_min_line_edit.text())
+            self.image_level_max = self.parseOptionalFloat(self.image_level_max_line_edit.text())
+            if (self.image_level_min is None) != (self.image_level_max is None):
+                raise ValueError('最小值和最大值需要同时填写，或都留空自动计算')
+            if self.image_level_min is not None and self.image_level_max is not None:
+                if self.image_level_min >= self.image_level_max:
+                    raise ValueError('最小值必须小于最大值')
+        except ValueError as err:
+            printError(err)
+            return
+
+        if hasattr(self, 'data'):
+            self.plotGrayScaleImage()
+
+    def autoImageLevels(self):
+        self.image_level_min_line_edit.clear()
+        self.image_level_max_line_edit.clear()
+        self.image_level_min = None
+        self.image_level_max = None
+        if hasattr(self, 'data'):
+            self.plotGrayScaleImage()
+
+    @staticmethod
+    def parseOptionalFloat(text: str):
+        text = text.strip()
+        return None if text == '' else float(text)
+
+    def imageLevels(self, data: np.array):
+        finite_data = np.asarray(data)[np.isfinite(data)]
+        if finite_data.size == 0:
+            return None
+
+        if self.image_level_min is not None and self.image_level_max is not None:
+            max_abs = float(np.max(np.abs(finite_data)))
+            if max_abs == 0:
+                max_abs = 1.0
+            return [max_abs * self.image_level_min / 100, max_abs * self.image_level_max / 100]
+
+        if self.image_colormap in self.diverging_colormaps:
+            limit = float(np.percentile(np.abs(finite_data), 90))
+            vmin, vmax = -limit, limit
+        else:
+            vmin, vmax = np.percentile(finite_data, [2, 98])
+            vmin, vmax = float(vmin), float(vmax)
+
+        if vmin == vmax:
+            vmin, vmax = vmin - 1, vmax + 1
+        return [vmin, vmax]
+
+    def imageColorMap(self):
+        if self.image_colormap == '灰度':
+            return None
+
+        try:
+            return pg.colormap.get(self.image_colormap)
+        except Exception:
+            values = np.linspace(0.0, 1.0, 256)
+            colors = (plt.get_cmap(self.image_colormap)(values) * 255).astype(np.ubyte)
+            return pg.ColorMap(values, colors)
+
+    def updateGrayScaleColorBar(self,
+                                plot_widget: MyPlotWidget,
+                                item: pg.ImageItem,
+                                color_map,
+                                levels,
+                                show_color_bar: bool) -> None:
+        if not show_color_bar:
+            return
+
+        if color_map is None:
+            if self.gray_scale_color_bar is not None:
+                self.gray_scale_color_bar.setVisible(False)
+            return
+
+        if self.gray_scale_color_bar is None:
+            self.gray_scale_color_bar = pg.ColorBarItem(values=levels, width=18, colorMap=color_map,
+                                                        label='幅值', interactive=True)
+            self.gray_scale_color_bar.setImageItem(item, insert_in=plot_widget.getPlotItem())
+        else:
+            self.gray_scale_color_bar.setVisible(True)
+            self.gray_scale_color_bar.setColorMap(color_map)
+            if levels is not None:
+                self.gray_scale_color_bar.setLevels(levels)
+            self.gray_scale_color_bar.setImageItem(item)
 
     def plotSingleChannelTime(self):
         """
@@ -1282,15 +1443,9 @@ class MainWindow(QMainWindow):
         plot_widget = MyPlotWidget('热力图', '时间（s）', '通道', check_mouse=False)
         self.tab_widget.addTab(plot_widget, '热力图')
 
-        tr = QTransform()
-        tr.scale(1 / self.sampling_rate, 1)  # 缩放
-        tr.translate(self.sampling_times_from_num, 0)  # 移动
-
         item = pg.ImageItem()
         item.setColorMap('viridis')
-        item.setImage(self.data.T)
-        item.setTransform(tr)
-        plot_widget.addItem(item)
+        self.addDataImageItem(plot_widget, item, self.data)
 
     # """------------------------------------------------------------------------------------------------------------"""
     """绘制二值图调用函数"""
@@ -1309,14 +1464,8 @@ class MainWindow(QMainWindow):
             plot_widget = MyPlotWidget('二值图', '时间（s）', '通道', check_mouse=False)
             self.tab_widget.addTab(plot_widget, f'二值图 - 阈值={self.binary_image.threshold}')
 
-            tr = QTransform()
-            tr.scale(1 / self.sampling_rate, 1)  # 缩放
-            tr.translate(self.sampling_times_from_num, 0)  # 移动
-
             item = pg.ImageItem()
-            item.setImage(data.T)
-            item.setTransform(tr)
-            plot_widget.addItem(item)
+            self.addDataImageItem(plot_widget, item, data)
 
     # """------------------------------------------------------------------------------------------------------------"""
     """计算数据特征调用的函数"""
@@ -1340,19 +1489,157 @@ class MainWindow(QMainWindow):
 
     def plotMultiWavesImage(self):
         """
-        绘制多通道云图
+        绘制带边界和按钮导航的多通道云图。
         Returns:
 
         """
-        plot_widget = MyPlotWidget('多通道云图', '时间（s）', '通道', check_mouse=False)
         x = xAxis(self.current_sampling_times,
                   self.sampling_times_from_num,
                   self.sampling_times_to_num,
                   self.sampling_rate)
-        colors = cycle(['red', 'lime', 'deepskyblue', 'yellow', 'plum', 'gold', 'blue', 'fuchsia', 'aqua', 'orange'])
-        for i in range(1, self.current_channels + 1):
-            plot_widget.draw(x, self.data[i - 1] + i, pen=QColor(next(colors)))  # 根据通道数个位选择颜色绘图
-        self.tab_widget.addTab(plot_widget, '多通道云图')
+        x_min, x_max = float(x[0]), float(x[-1])
+        if x_max <= x_min:
+            x_max = x_min + 1 / self.sampling_rate
+
+        # 鼠标用于精细平移和缩放；下方按钮用于按固定步长快速浏览。
+        view_box = pg.ViewBox(enableMenu=False)
+        plot_widget = pg.PlotWidget(viewBox=view_box)
+        plot_widget.setTitle('<font face="Microsoft YaHei" size="5">多通道云图</font>')
+        plot_widget.setLabel('bottom', '<font face="Microsoft YaHei" size="3">时间（s）</font>')
+        plot_widget.setLabel('left', '<font face="Microsoft YaHei" size="3">通道</font>')
+        plot_widget.getAxis('bottom').setTickFont(QFont('Times New Roman'))
+        plot_widget.getAxis('left').setTickFont(QFont('Times New Roman'))
+        plot_widget.getAxis('left').setWidth(50)
+        plot_widget.showGrid(x=True, y=True, alpha=0.2)
+
+        channel_min = self.channel_from_num
+        channel_max = self.channel_to_num
+        channel_from_spin_box = SpinBox()
+        channel_to_spin_box = SpinBox()
+        for spin_box in (channel_from_spin_box, channel_to_spin_box):
+            spin_box.setRange(channel_min, channel_max)
+            spin_box.setFixedWidth(90)
+            # 输入多位通道号时不要在每个字符后立即触发重绘。
+            spin_box.setKeyboardTracking(False)
+        channel_from_spin_box.setValue(channel_min)
+        channel_to_spin_box.setValue(min(channel_min + 19, channel_max))
+        confirm_channel_button = PushButton('确认')
+
+        channel_range_label = Label('')
+        time_range_label = Label('')
+        left_button = PushButton('←')
+        right_button = PushButton('→')
+        up_button = PushButton('↑')
+        down_button = PushButton('↓')
+        for button in (left_button, right_button, up_button, down_button):
+            button.setFixedWidth(45)
+        left_button.setToolTip('向前移动时间范围')
+        right_button.setToolTip('向后移动时间范围')
+        up_button.setToolTip('向更大通道号移动范围')
+        down_button.setToolTip('向更小通道号移动范围')
+
+        full_time_width = x_max - x_min
+        time_window_width = max(full_time_width / 5, 1 / self.sampling_rate)
+        time_window_width = min(time_window_width, full_time_width)
+        state = {'time_from': x_min}
+        colors = ['red', 'lime', 'deepskyblue', 'yellow', 'plum', 'gold', 'blue', 'fuchsia', 'aqua', 'orange']
+
+        # 视图永远被限制在当前已选择的数据区域内。
+        view_box.setLimits(xMin=x_min, xMax=x_max,
+                           yMin=channel_min - 0.5, yMax=channel_max + 0.5,
+                           minXRange=min(time_window_width, full_time_width), maxXRange=full_time_width,
+                           minYRange=1, maxYRange=self.current_channels)
+
+        def update_time_label():
+            time_to = state['time_from'] + time_window_width
+            time_range_label.setText(f'时间：{state["time_from"]:.3f} - {time_to:.3f} s')
+
+        def update_view_range():
+            channel_from = channel_from_spin_box.value()
+            channel_to = channel_to_spin_box.value()
+
+            view_box.setRange(xRange=(state['time_from'], state['time_from'] + time_window_width),
+                              yRange=(channel_from - 0.5, channel_to + 0.5),
+                              padding=0)
+            channel_range_label.setText(f'通道：{channel_from} - {channel_to}')
+            update_time_label()
+
+        def draw_visible_channels():
+            channel_from = channel_from_spin_box.value()
+            channel_to = channel_to_spin_box.value()
+
+            plot_widget.clear()
+            for channel_number in range(channel_from, channel_to + 1):
+                plot_widget.plot(x,
+                                 self.data[channel_number - channel_min] + channel_number,
+                                 pen=QColor(colors[(channel_number - 1) % len(colors)]))
+            update_view_range()
+
+        def set_channel_range(channel_from: int, channel_to: int):
+            channel_from = max(channel_min, channel_from)
+            channel_to = min(channel_max, channel_to)
+            channel_from_spin_box.blockSignals(True)
+            channel_to_spin_box.blockSignals(True)
+            channel_from_spin_box.setValue(channel_from)
+            channel_to_spin_box.setValue(channel_to)
+            channel_from_spin_box.blockSignals(False)
+            channel_to_spin_box.blockSignals(False)
+            draw_visible_channels()
+
+        def confirm_channel_range():
+            # 提交编辑框中的完整文本，避免只读取到输入中的首位数字。
+            channel_from_spin_box.interpretText()
+            channel_to_spin_box.interpretText()
+            if channel_from_spin_box.value() > channel_to_spin_box.value():
+                printError('起始通道不能大于结束通道')
+                return
+            draw_visible_channels()
+
+        def move_time(direction: int):
+            step = max(time_window_width * 0.8, 1 / self.sampling_rate)
+            max_time_from = x_max - time_window_width
+            state['time_from'] = min(max(state['time_from'] + direction * step, x_min), max_time_from)
+            update_view_range()
+
+        def move_channels(direction: int):
+            channel_from = channel_from_spin_box.value()
+            channel_to = channel_to_spin_box.value()
+            width = channel_to - channel_from + 1
+            step = max(1, width // 2)
+            new_channel_from = min(max(channel_from + direction * step, channel_min),
+                                   channel_max - width + 1)
+            set_channel_range(new_channel_from, new_channel_from + width - 1)
+
+        confirm_channel_button.clicked.connect(confirm_channel_range)
+        left_button.clicked.connect(lambda: move_time(-1))
+        right_button.clicked.connect(lambda: move_time(1))
+        up_button.clicked.connect(lambda: move_channels(1))
+        down_button.clicked.connect(lambda: move_channels(-1))
+        draw_visible_channels()
+
+        controls_hbox = QHBoxLayout()
+        controls_hbox.addWidget(Label('显示通道'))
+        controls_hbox.addWidget(channel_from_spin_box)
+        controls_hbox.addWidget(Label('至'))
+        controls_hbox.addWidget(channel_to_spin_box)
+        controls_hbox.addWidget(confirm_channel_button)
+        controls_hbox.addSpacing(15)
+        controls_hbox.addWidget(left_button)
+        controls_hbox.addWidget(right_button)
+        controls_hbox.addWidget(up_button)
+        controls_hbox.addWidget(down_button)
+        controls_hbox.addSpacing(15)
+        controls_hbox.addWidget(channel_range_label)
+        controls_hbox.addSpacing(15)
+        controls_hbox.addWidget(time_range_label)
+        controls_hbox.addStretch(1)
+
+        container = QWidget()
+        vbox = QVBoxLayout()
+        vbox.addWidget(plot_widget)
+        vbox.addLayout(controls_hbox)
+        container.setLayout(vbox)
+        self.tab_widget.addTab(container, '多通道云图')
 
     # """------------------------------------------------------------------------------------------------------------"""
     """绘制应变图调用函数"""
