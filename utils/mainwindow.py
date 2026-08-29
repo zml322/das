@@ -276,7 +276,7 @@ class MainWindow(QMainWindow):
         self.plot_multichannel_image_action = Action(self.plot_menu,
                                                      '多通道云图',
                                                      '绘制多通道云图',
-                                                     self.plotMultiWavesImage)
+                                                     self.showMultiWavesTab)
 
         # 绘图-应变图
         self.plot_strain_image_action = Action(self.plot_menu,
@@ -550,8 +550,11 @@ class MainWindow(QMainWindow):
         self.tab_widget.tabCloseRequested[int].connect(self.removeTab)
         self.tab_widget.addTab(self.plot_gray_scale_widget, '灰度图')
         self.tab_widget.addTab(combine_image_widget, '单通道')
+        self.initMultiWavesTab()
+        self.tab_widget.addTab(self.multi_waves_container, '多通道云图')
         self.tab_widget.tabBar().setTabButton(0, QTabBar.RightSide, None)
         self.tab_widget.tabBar().setTabButton(1, QTabBar.RightSide, None)  # 设置删除按钮消失
+        self.tab_widget.tabBar().setTabButton(2, QTabBar.RightSide, None)
 
         # GPS时间组件
         gps_from_label = Label('始')
@@ -588,6 +591,71 @@ class MainWindow(QMainWindow):
         main_window_widget.setLayout(main_window_hbox)
         self.setCentralWidget(main_window_widget)
 
+    def initMultiWavesTab(self):
+        """创建固定的多通道云图页；数据变化时只重绘，不重复创建 Tab。"""
+        self.multi_waves_view_box = pg.ViewBox(enableMenu=False)
+        self.plot_multi_waves_widget = pg.PlotWidget(viewBox=self.multi_waves_view_box)
+        self.plot_multi_waves_widget.setTitle('<font face="Microsoft YaHei" size="5">多通道云图</font>')
+        self.plot_multi_waves_widget.setLabel('bottom', '<font face="Microsoft YaHei" size="3">时间（s）</font>')
+        self.plot_multi_waves_widget.setLabel('left', '<font face="Microsoft YaHei" size="3">通道</font>')
+        self.plot_multi_waves_widget.getAxis('bottom').setTickFont(QFont('Times New Roman'))
+        self.plot_multi_waves_widget.getAxis('left').setTickFont(QFont('Times New Roman'))
+        self.plot_multi_waves_widget.getAxis('left').setWidth(50)
+        self.plot_multi_waves_widget.showGrid(x=True, y=True, alpha=0.2)
+
+        self.multi_waves_channel_from_spin_box = SpinBox()
+        self.multi_waves_channel_to_spin_box = SpinBox()
+        for spin_box in (self.multi_waves_channel_from_spin_box, self.multi_waves_channel_to_spin_box):
+            spin_box.setFixedWidth(90)
+            spin_box.setKeyboardTracking(False)
+
+        self.multi_waves_confirm_button = PushButton('确认')
+        self.multi_waves_channel_range_label = Label('')
+        self.multi_waves_time_range_label = Label('')
+        self.multi_waves_left_button = PushButton('←')
+        self.multi_waves_right_button = PushButton('→')
+        self.multi_waves_up_button = PushButton('↑')
+        self.multi_waves_down_button = PushButton('↓')
+        for button in (self.multi_waves_left_button, self.multi_waves_right_button,
+                       self.multi_waves_up_button, self.multi_waves_down_button):
+            button.setFixedWidth(45)
+        self.multi_waves_left_button.setToolTip('向前移动时间范围')
+        self.multi_waves_right_button.setToolTip('向后移动时间范围')
+        self.multi_waves_up_button.setToolTip('向更大通道号移动范围')
+        self.multi_waves_down_button.setToolTip('向更小通道号移动范围')
+
+        self.multi_waves_confirm_button.clicked.connect(self.confirmMultiWavesChannelRange)
+        self.multi_waves_left_button.clicked.connect(lambda: self.moveMultiWavesTime(-1))
+        self.multi_waves_right_button.clicked.connect(lambda: self.moveMultiWavesTime(1))
+        self.multi_waves_up_button.clicked.connect(lambda: self.moveMultiWavesChannels(1))
+        self.multi_waves_down_button.clicked.connect(lambda: self.moveMultiWavesChannels(-1))
+
+        controls_hbox = QHBoxLayout()
+        controls_hbox.addWidget(Label('显示通道'))
+        controls_hbox.addWidget(self.multi_waves_channel_from_spin_box)
+        controls_hbox.addWidget(Label('至'))
+        controls_hbox.addWidget(self.multi_waves_channel_to_spin_box)
+        controls_hbox.addWidget(self.multi_waves_confirm_button)
+        controls_hbox.addSpacing(15)
+        controls_hbox.addWidget(self.multi_waves_left_button)
+        controls_hbox.addWidget(self.multi_waves_right_button)
+        controls_hbox.addWidget(self.multi_waves_up_button)
+        controls_hbox.addWidget(self.multi_waves_down_button)
+        controls_hbox.addSpacing(15)
+        controls_hbox.addWidget(self.multi_waves_channel_range_label)
+        controls_hbox.addSpacing(15)
+        controls_hbox.addWidget(self.multi_waves_time_range_label)
+        controls_hbox.addStretch(1)
+
+        self.multi_waves_container = QWidget()
+        vbox = QVBoxLayout()
+        vbox.addWidget(self.plot_multi_waves_widget)
+        vbox.addLayout(controls_hbox)
+        self.multi_waves_container.setLayout(vbox)
+        self.multi_waves_reset_pending = True
+        self.multi_waves_colors = ['red', 'lime', 'deepskyblue', 'yellow', 'plum', 'gold', 'blue', 'fuchsia',
+                                   'aqua', 'orange']
+
     def initLocalParams(self):
         """
         初始化局部参数，即适用于单个文件，重新选择文件后更新
@@ -604,6 +672,7 @@ class MainWindow(QMainWindow):
         self.channel_to_num = self.channels_num
         self.sampling_times_from_num = 1
         self.sampling_times_to_num = self.sampling_times
+        self.multi_waves_reset_pending = True
 
     # """------------------------------------------------------------------------------------------------------------"""
     """继承mainwindow自带函数"""
@@ -982,6 +1051,7 @@ class MainWindow(QMainWindow):
         self.plotGrayScaleImage()
         self.plotSingleChannelTime()
         self.plotAmplitudeFrequency()
+        self.plotMultiWavesImage()
 
     def updateAll(self):
         """
@@ -1487,159 +1557,134 @@ class MainWindow(QMainWindow):
     # """------------------------------------------------------------------------------------------------------------"""
     """绘制多通道云图调用函数"""
 
+    def showMultiWavesTab(self):
+        """定位到固定云图页；菜单入口不再创建临时 Tab。"""
+        self.tab_widget.setCurrentWidget(self.multi_waves_container)
+        self.plotMultiWavesImage()
+
     def plotMultiWavesImage(self):
-        """
-        绘制带边界和按钮导航的多通道云图。
-        Returns:
+        """按当前数据刷新固定的多通道云图页。"""
+        if not hasattr(self, 'data') or self.data.size == 0:
+            self.plot_multi_waves_widget.clear()
+            return
 
-        """
-        x = xAxis(self.current_sampling_times,
-                  self.sampling_times_from_num,
-                  self.sampling_times_to_num,
-                  self.sampling_rate)
-        x_min, x_max = float(x[0]), float(x[-1])
-        if x_max <= x_min:
-            x_max = x_min + 1 / self.sampling_rate
+        self.multi_waves_x = xAxis(self.current_sampling_times,
+                                   self.sampling_times_from_num,
+                                   self.sampling_times_to_num,
+                                   self.sampling_rate)
+        self.multi_waves_x_min = float(self.multi_waves_x[0])
+        self.multi_waves_x_max = float(self.multi_waves_x[-1])
+        if self.multi_waves_x_max <= self.multi_waves_x_min:
+            self.multi_waves_x_max = self.multi_waves_x_min + 1 / self.sampling_rate
 
-        # 鼠标用于精细平移和缩放；下方按钮用于按固定步长快速浏览。
-        view_box = pg.ViewBox(enableMenu=False)
-        plot_widget = pg.PlotWidget(viewBox=view_box)
-        plot_widget.setTitle('<font face="Microsoft YaHei" size="5">多通道云图</font>')
-        plot_widget.setLabel('bottom', '<font face="Microsoft YaHei" size="3">时间（s）</font>')
-        plot_widget.setLabel('left', '<font face="Microsoft YaHei" size="3">通道</font>')
-        plot_widget.getAxis('bottom').setTickFont(QFont('Times New Roman'))
-        plot_widget.getAxis('left').setTickFont(QFont('Times New Roman'))
-        plot_widget.getAxis('left').setWidth(50)
-        plot_widget.showGrid(x=True, y=True, alpha=0.2)
+        self.multi_waves_channel_min = self.channel_from_num
+        self.multi_waves_channel_max = self.channel_to_num
+        full_time_width = self.multi_waves_x_max - self.multi_waves_x_min
+        self.multi_waves_time_window_width = min(max(full_time_width / 5, 1 / self.sampling_rate), full_time_width)
 
-        channel_min = self.channel_from_num
-        channel_max = self.channel_to_num
-        channel_from_spin_box = SpinBox()
-        channel_to_spin_box = SpinBox()
-        for spin_box in (channel_from_spin_box, channel_to_spin_box):
-            spin_box.setRange(channel_min, channel_max)
-            spin_box.setFixedWidth(90)
-            # 输入多位通道号时不要在每个字符后立即触发重绘。
-            spin_box.setKeyboardTracking(False)
-        channel_from_spin_box.setValue(channel_min)
-        channel_to_spin_box.setValue(min(channel_min + 19, channel_max))
-        confirm_channel_button = PushButton('确认')
+        previous_channel_from = self.multi_waves_channel_from_spin_box.value()
+        previous_channel_to = self.multi_waves_channel_to_spin_box.value()
+        should_reset = self.multi_waves_reset_pending or previous_channel_from < self.multi_waves_channel_min \
+            or previous_channel_to > self.multi_waves_channel_max or previous_channel_from > previous_channel_to
+        if should_reset:
+            channel_from = self.multi_waves_channel_min
+            channel_to = min(channel_from + 19, self.multi_waves_channel_max)
+            self.multi_waves_time_from = self.multi_waves_x_min
+        else:
+            channel_from = max(self.multi_waves_channel_min, previous_channel_from)
+            channel_to = min(self.multi_waves_channel_max, previous_channel_to)
+            max_time_from = self.multi_waves_x_max - self.multi_waves_time_window_width
+            self.multi_waves_time_from = min(max(getattr(self, 'multi_waves_time_from', self.multi_waves_x_min),
+                                                  self.multi_waves_x_min), max_time_from)
 
-        channel_range_label = Label('')
-        time_range_label = Label('')
-        left_button = PushButton('←')
-        right_button = PushButton('→')
-        up_button = PushButton('↑')
-        down_button = PushButton('↓')
-        for button in (left_button, right_button, up_button, down_button):
-            button.setFixedWidth(45)
-        left_button.setToolTip('向前移动时间范围')
-        right_button.setToolTip('向后移动时间范围')
-        up_button.setToolTip('向更大通道号移动范围')
-        down_button.setToolTip('向更小通道号移动范围')
+        self.multi_waves_channel_from_spin_box.blockSignals(True)
+        self.multi_waves_channel_to_spin_box.blockSignals(True)
+        self.multi_waves_channel_from_spin_box.setRange(self.multi_waves_channel_min, self.multi_waves_channel_max)
+        self.multi_waves_channel_to_spin_box.setRange(self.multi_waves_channel_min, self.multi_waves_channel_max)
+        self.multi_waves_channel_from_spin_box.setValue(channel_from)
+        self.multi_waves_channel_to_spin_box.setValue(channel_to)
+        self.multi_waves_channel_from_spin_box.blockSignals(False)
+        self.multi_waves_channel_to_spin_box.blockSignals(False)
 
-        full_time_width = x_max - x_min
-        time_window_width = max(full_time_width / 5, 1 / self.sampling_rate)
-        time_window_width = min(time_window_width, full_time_width)
-        state = {'time_from': x_min}
-        colors = ['red', 'lime', 'deepskyblue', 'yellow', 'plum', 'gold', 'blue', 'fuchsia', 'aqua', 'orange']
+        self.multi_waves_view_box.setLimits(
+            xMin=self.multi_waves_x_min, xMax=self.multi_waves_x_max,
+            yMin=self.multi_waves_channel_min - 0.5, yMax=self.multi_waves_channel_max + 0.5,
+            minXRange=min(self.multi_waves_time_window_width, full_time_width), maxXRange=full_time_width,
+            minYRange=1, maxYRange=self.current_channels)
+        self.multi_waves_reset_pending = False
+        self.drawMultiWavesVisibleChannels()
 
-        # 视图永远被限制在当前已选择的数据区域内。
-        view_box.setLimits(xMin=x_min, xMax=x_max,
-                           yMin=channel_min - 0.5, yMax=channel_max + 0.5,
-                           minXRange=min(time_window_width, full_time_width), maxXRange=full_time_width,
-                           minYRange=1, maxYRange=self.current_channels)
+    def drawMultiWavesVisibleChannels(self):
+        """重绘当前选定的云图通道，并保持视图范围在新数据边界内。"""
+        if not hasattr(self, 'multi_waves_x'):
+            return
+        channel_from = self.multi_waves_channel_from_spin_box.value()
+        channel_to = self.multi_waves_channel_to_spin_box.value()
+        self.plot_multi_waves_widget.clear()
+        for channel_number in range(channel_from, channel_to + 1):
+            self.plot_multi_waves_widget.plot(
+                self.multi_waves_x,
+                self.data[channel_number - self.multi_waves_channel_min] + channel_number,
+                pen=QColor(self.multi_waves_colors[(channel_number - 1) % len(self.multi_waves_colors)]))
+        self.updateMultiWavesViewRange()
 
-        def update_time_label():
-            time_to = state['time_from'] + time_window_width
-            time_range_label.setText(f'时间：{state["time_from"]:.3f} - {time_to:.3f} s')
+    def updateMultiWavesViewRange(self):
+        """同步云图的按钮导航状态、标签和 ViewBox 范围。"""
+        channel_from = self.multi_waves_channel_from_spin_box.value()
+        channel_to = self.multi_waves_channel_to_spin_box.value()
+        max_time_from = self.multi_waves_x_max - self.multi_waves_time_window_width
+        self.multi_waves_time_from = min(max(self.multi_waves_time_from, self.multi_waves_x_min), max_time_from)
+        self.multi_waves_view_box.setRange(
+            xRange=(self.multi_waves_time_from,
+                    self.multi_waves_time_from + self.multi_waves_time_window_width),
+            yRange=(channel_from - 0.5, channel_to + 0.5), padding=0)
+        self.multi_waves_channel_range_label.setText(f'通道：{channel_from} - {channel_to}')
+        self.multi_waves_time_range_label.setText(
+            f'时间：{self.multi_waves_time_from:.3f} - '
+            f'{self.multi_waves_time_from + self.multi_waves_time_window_width:.3f} s')
 
-        def update_view_range():
-            channel_from = channel_from_spin_box.value()
-            channel_to = channel_to_spin_box.value()
+    def setMultiWavesChannelRange(self, channel_from: int, channel_to: int):
+        """限制通道范围、同步输入框并重绘固定云图。"""
+        channel_from = min(max(channel_from, self.multi_waves_channel_min), self.multi_waves_channel_max)
+        channel_to = min(max(channel_to, channel_from), self.multi_waves_channel_max)
+        self.multi_waves_channel_from_spin_box.blockSignals(True)
+        self.multi_waves_channel_to_spin_box.blockSignals(True)
+        self.multi_waves_channel_from_spin_box.setValue(channel_from)
+        self.multi_waves_channel_to_spin_box.setValue(channel_to)
+        self.multi_waves_channel_from_spin_box.blockSignals(False)
+        self.multi_waves_channel_to_spin_box.blockSignals(False)
+        self.drawMultiWavesVisibleChannels()
 
-            view_box.setRange(xRange=(state['time_from'], state['time_from'] + time_window_width),
-                              yRange=(channel_from - 0.5, channel_to + 0.5),
-                              padding=0)
-            channel_range_label.setText(f'通道：{channel_from} - {channel_to}')
-            update_time_label()
+    def confirmMultiWavesChannelRange(self):
+        """提交完整的多位通道输入，并防止起止通道颠倒。"""
+        self.multi_waves_channel_from_spin_box.interpretText()
+        self.multi_waves_channel_to_spin_box.interpretText()
+        channel_from = self.multi_waves_channel_from_spin_box.value()
+        channel_to = self.multi_waves_channel_to_spin_box.value()
+        if channel_from > channel_to:
+            printError('起始通道不能大于结束通道')
+            return
+        self.drawMultiWavesVisibleChannels()
 
-        def draw_visible_channels():
-            channel_from = channel_from_spin_box.value()
-            channel_to = channel_to_spin_box.value()
+    def moveMultiWavesTime(self, direction: int):
+        """按当前时间窗口宽度平移固定云图。"""
+        if not hasattr(self, 'multi_waves_x'):
+            return
+        step = max(self.multi_waves_time_window_width * 0.8, 1 / self.sampling_rate)
+        self.multi_waves_time_from += direction * step
+        self.updateMultiWavesViewRange()
 
-            plot_widget.clear()
-            for channel_number in range(channel_from, channel_to + 1):
-                plot_widget.plot(x,
-                                 self.data[channel_number - channel_min] + channel_number,
-                                 pen=QColor(colors[(channel_number - 1) % len(colors)]))
-            update_view_range()
-
-        def set_channel_range(channel_from: int, channel_to: int):
-            channel_from = max(channel_min, channel_from)
-            channel_to = min(channel_max, channel_to)
-            channel_from_spin_box.blockSignals(True)
-            channel_to_spin_box.blockSignals(True)
-            channel_from_spin_box.setValue(channel_from)
-            channel_to_spin_box.setValue(channel_to)
-            channel_from_spin_box.blockSignals(False)
-            channel_to_spin_box.blockSignals(False)
-            draw_visible_channels()
-
-        def confirm_channel_range():
-            # 提交编辑框中的完整文本，避免只读取到输入中的首位数字。
-            channel_from_spin_box.interpretText()
-            channel_to_spin_box.interpretText()
-            if channel_from_spin_box.value() > channel_to_spin_box.value():
-                printError('起始通道不能大于结束通道')
-                return
-            draw_visible_channels()
-
-        def move_time(direction: int):
-            step = max(time_window_width * 0.8, 1 / self.sampling_rate)
-            max_time_from = x_max - time_window_width
-            state['time_from'] = min(max(state['time_from'] + direction * step, x_min), max_time_from)
-            update_view_range()
-
-        def move_channels(direction: int):
-            channel_from = channel_from_spin_box.value()
-            channel_to = channel_to_spin_box.value()
-            width = channel_to - channel_from + 1
-            step = max(1, width // 2)
-            new_channel_from = min(max(channel_from + direction * step, channel_min),
-                                   channel_max - width + 1)
-            set_channel_range(new_channel_from, new_channel_from + width - 1)
-
-        confirm_channel_button.clicked.connect(confirm_channel_range)
-        left_button.clicked.connect(lambda: move_time(-1))
-        right_button.clicked.connect(lambda: move_time(1))
-        up_button.clicked.connect(lambda: move_channels(1))
-        down_button.clicked.connect(lambda: move_channels(-1))
-        draw_visible_channels()
-
-        controls_hbox = QHBoxLayout()
-        controls_hbox.addWidget(Label('显示通道'))
-        controls_hbox.addWidget(channel_from_spin_box)
-        controls_hbox.addWidget(Label('至'))
-        controls_hbox.addWidget(channel_to_spin_box)
-        controls_hbox.addWidget(confirm_channel_button)
-        controls_hbox.addSpacing(15)
-        controls_hbox.addWidget(left_button)
-        controls_hbox.addWidget(right_button)
-        controls_hbox.addWidget(up_button)
-        controls_hbox.addWidget(down_button)
-        controls_hbox.addSpacing(15)
-        controls_hbox.addWidget(channel_range_label)
-        controls_hbox.addSpacing(15)
-        controls_hbox.addWidget(time_range_label)
-        controls_hbox.addStretch(1)
-
-        container = QWidget()
-        vbox = QVBoxLayout()
-        vbox.addWidget(plot_widget)
-        vbox.addLayout(controls_hbox)
-        container.setLayout(vbox)
-        self.tab_widget.addTab(container, '多通道云图')
+    def moveMultiWavesChannels(self, direction: int):
+        """保持当前通道窗口宽度，向上或向下浏览云图。"""
+        if not hasattr(self, 'multi_waves_x'):
+            return
+        channel_from = self.multi_waves_channel_from_spin_box.value()
+        channel_to = self.multi_waves_channel_to_spin_box.value()
+        width = channel_to - channel_from + 1
+        step = max(1, width // 2)
+        new_channel_from = min(max(channel_from + direction * step, self.multi_waves_channel_min),
+                               self.multi_waves_channel_max - width + 1)
+        self.setMultiWavesChannelRange(new_channel_from, new_channel_from + width - 1)
 
     # """------------------------------------------------------------------------------------------------------------"""
     """绘制应变图调用函数"""
