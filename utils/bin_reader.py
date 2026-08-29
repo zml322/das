@@ -3,6 +3,31 @@ import numpy as np
 
 HEADER_FLOATS = 20
 HEADER_BYTES = HEADER_FLOATS * 4
+HEADER_FRAMES_INDEX = 7
+HEADER_CHANNELS_INDEX = 8
+HEADER_SAMPLING_RATE_INDEX = 9
+
+
+def bin_header_metadata(header):
+    """解析 notebook 定义的 BIN 头字段。"""
+    if len(header) < HEADER_FLOATS:
+        raise ValueError(f"BIN 文件头长度不足，期望 {HEADER_FLOATS} 个 float32。")
+
+    def integer_field(index, name):
+        value = float(header[index])
+        if not np.isfinite(value) or value <= 0:
+            raise ValueError(f"BIN 文件头 {name} 无效: {value}")
+        integer_value = int(value)
+        if value != integer_value:
+            raise ValueError(f"BIN 文件头 {name} 必须是正整数: {value}")
+        return integer_value
+
+    sampling_times = integer_field(HEADER_FRAMES_INDEX, "帧数(header[7])")
+    channels_num = integer_field(HEADER_CHANNELS_INDEX, "通道数(header[8])")
+    sampling_rate = float(header[HEADER_SAMPLING_RATE_INDEX])
+    if not np.isfinite(sampling_rate) or sampling_rate <= 0:
+        raise ValueError(f"BIN 文件头采样率(header[9])无效: {sampling_rate}")
+    return sampling_times, channels_num, sampling_rate
 
 
 def read_bin_header(file_path):
@@ -10,7 +35,7 @@ def read_bin_header(file_path):
     读取 20 位头(80字节)的 .bin 格式 DAS 数据头。
 
     Returns:
-        tuple: (header, sampling_times, channels_num, endian)
+        tuple: (header, sampling_times, channels_num, sampling_rate, endian)
     """
     file_size = os.path.getsize(file_path)
 
@@ -41,9 +66,7 @@ def read_bin_header(file_path):
         endian = "<"
         hdr = hdr_le
 
-    # 获取维度 N(每道点数) 和 M(道数)
-    n_hdr = int(round(float(hdr[7])))
-    m_hdr = int(round(float(hdr[8])))
+    sampling_times, channels_num, sampling_rate = bin_header_metadata(hdr)
 
     # 利用文件总长度做交叉验证 (Cross-check)
     body_bytes = file_size - HEADER_BYTES
@@ -51,29 +74,26 @@ def read_bin_header(file_path):
         raise ValueError(f"{file_path}: 数据体字节数不是 float32 的整数倍。")
     total_floats = body_bytes // 4
 
-    if n_hdr > 0 and m_hdr > 0 and n_hdr * m_hdr == total_floats:
-        N, M = n_hdr, m_hdr
-    elif n_hdr > 0 and total_floats % n_hdr == 0:
-        N, M = n_hdr, total_floats // n_hdr
-    elif m_hdr > 0 and total_floats % m_hdr == 0:
-        M, N = m_hdr, total_floats // m_hdr
-    else:
-        raise ValueError(f"{file_path}: 无法推断维度，n_hdr={n_hdr}, m_hdr={m_hdr}, 实际数据量={total_floats}")
+    expected_floats = sampling_times * channels_num
+    if expected_floats != total_floats:
+        raise ValueError(
+            f"{file_path}: 头部帧数={sampling_times}、通道数={channels_num}，"
+            f"预期数据量={expected_floats}，实际数据量={total_floats}")
 
-    return hdr, N, M, endian
+    return hdr, sampling_times, channels_num, sampling_rate, endian
 
 
 def bin2numpy(file_path, ch1=0, ch2=None):
     """
     直接读取 20 位头(80字节)的 .bin 格式 DAS 数据。
 
-    返回形状为 (采样次数, 通道数)；主程序内部使用时需要转置为 (通道数, 采样次数)。
+    返回与 bin.ipynb 一致的 (通道数, 采样次数) 形状。
     """
-    _header, N, M, endian = read_bin_header(file_path)
+    _header, sampling_times, channels_num, _sampling_rate, endian = read_bin_header(file_path)
     if ch2 is None:
-        ch2 = M
-    if ch1 < 0 or ch2 > M or ch1 >= ch2:
-        raise ValueError(f"{file_path}: 通道范围无效，ch1={ch1}, ch2={ch2}, channels={M}")
+        ch2 = channels_num
+    if ch1 < 0 or ch2 > channels_num or ch1 >= ch2:
+        raise ValueError(f"{file_path}: 通道范围无效，ch1={ch1}, ch2={ch2}, channels={channels_num}")
 
     # 一次性读取数据体
     with open(file_path, "rb") as f:
@@ -84,8 +104,8 @@ def bin2numpy(file_path, ch1=0, ch2=None):
     dtype_str = endian + "f4"
     data_arr = np.frombuffer(data_bytes, dtype=dtype_str)
 
-    # 按照列优先（Fortran order）重塑为 (nt, nchan) 矩阵
-    data_matrix = data_arr.reshape((N, M), order='F')
+    # 原始数据按通道逐帧连续存储，和 notebook 的 reshape 方式保持一致。
+    data_matrix = data_arr.reshape((channels_num, sampling_times))
 
     # 截取你需要的道数范围并返回（加上 astype 确保内存连续性，保护后续 pytorch 运算不报错）
-    return data_matrix[:, ch1:ch2].astype(np.float32, copy=False)
+    return data_matrix[ch1:ch2].astype(np.float32, copy=False)

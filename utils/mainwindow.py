@@ -13,7 +13,7 @@ import pandas as pd
 from PyQt5 import QtMultimedia
 from PyQt5.QtCore import QUrl, QEvent, QRectF
 from PyQt5.QtWidgets import QApplication, QMainWindow, QFileDialog, qApp, QTabWidget, QTableWidget, QAbstractItemView, \
-    QTableWidgetItem, QHeaderView, QTabBar, QScrollBar, QHBoxLayout
+    QTableWidgetItem, QHeaderView, QTabBar, QScrollBar, QHBoxLayout, QDoubleSpinBox, QSplitter
 from matplotlib import pyplot as plt
 from scipy.integrate import cumulative_trapezoid
 
@@ -424,8 +424,10 @@ class MainWindow(QMainWindow):
         self.files_table_widget.setEditTriggers(QAbstractItemView.NoEditTriggers)  # 设置表格不可编辑
         self.files_table_widget.setHorizontalHeaderLabels(['文件'])  # 设置表头
         self.files_table_widget.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.files_table_widget.verticalHeader().setVisible(False)
+        self.files_table_widget.setWordWrap(False)
+        self.files_table_widget.setToolTip('鼠标悬停在文件名上可查看完整路径')
         QTableWidget.resizeRowsToContents(self.files_table_widget)
-        QTableWidget.resizeColumnsToContents(self.files_table_widget)  # 设置表格排与列的宽度随内容改变
         self.files_table_widget.setSelectionBehavior(QAbstractItemView.SelectRows)  # 设置一次选中一排内容
         self.files_table_widget.itemClicked.connect(self.selectDataFromTable)
 
@@ -439,7 +441,7 @@ class MainWindow(QMainWindow):
         # 右侧
         # 参数
         sampling_rate_label = Label('采样率')
-        self.sampling_rate_line_edit = LineEditWithReg(focus=False)
+        self.sampling_rate_line_edit = LineEditWithReg(digit=True, focus=False)
 
         sampling_times_label = Label('采样次数')
         self.current_sampling_times_line_edit = LineEditWithReg(focus=False)
@@ -581,13 +583,24 @@ class MainWindow(QMainWindow):
         main_window_vbox.addLayout(gps_hbox)
 
         # 主页面
-        main_window_hbox.addSpacing(10)
-        main_window_hbox.addLayout(file_area_vbox)
-        main_window_hbox.addSpacing(20)
-        main_window_hbox.addLayout(main_window_vbox)
-        main_window_hbox.addSpacing(10)
-        main_window_hbox.setStretchFactor(file_area_vbox, 1)
-        main_window_hbox.setStretchFactor(main_window_vbox, 4)  # 设置各部分所占比例
+        file_area_widget = QWidget()
+        file_area_widget.setMinimumWidth(320)
+        file_area_widget.setLayout(file_area_vbox)
+
+        content_widget = QWidget()
+        content_widget.setMinimumWidth(500)
+        content_widget.setLayout(main_window_vbox)
+
+        self.main_splitter = QSplitter(Qt.Horizontal)
+        self.main_splitter.setChildrenCollapsible(False)
+        self.main_splitter.setHandleWidth(8)
+        self.main_splitter.addWidget(file_area_widget)
+        self.main_splitter.addWidget(content_widget)
+        self.main_splitter.setStretchFactor(0, 0)
+        self.main_splitter.setStretchFactor(1, 1)
+        self.main_splitter.setSizes([520, 1000])
+
+        main_window_hbox.addWidget(self.main_splitter)
         main_window_widget.setLayout(main_window_hbox)
         self.setCentralWidget(main_window_widget)
 
@@ -612,6 +625,15 @@ class MainWindow(QMainWindow):
         self.multi_waves_confirm_button = PushButton('确认')
         self.multi_waves_channel_range_label = Label('')
         self.multi_waves_time_range_label = Label('')
+        self.multi_waves_time_from_spin_box = QDoubleSpinBox()
+        self.multi_waves_time_to_spin_box = QDoubleSpinBox()
+        for spin_box in (self.multi_waves_time_from_spin_box, self.multi_waves_time_to_spin_box):
+            spin_box.setDecimals(6)
+            spin_box.setFixedWidth(110)
+            spin_box.setKeyboardTracking(False)
+            spin_box.setSuffix(' s')
+            spin_box.setStyleSheet('font-size: 17px; font-family: "Times New Roman", "Microsoft YaHei";')
+        self.multi_waves_time_confirm_button = PushButton('确认时间')
         self.multi_waves_left_button = PushButton('←')
         self.multi_waves_right_button = PushButton('→')
         self.multi_waves_up_button = PushButton('↑')
@@ -625,6 +647,7 @@ class MainWindow(QMainWindow):
         self.multi_waves_down_button.setToolTip('向更小通道号移动范围')
 
         self.multi_waves_confirm_button.clicked.connect(self.confirmMultiWavesChannelRange)
+        self.multi_waves_time_confirm_button.clicked.connect(self.confirmMultiWavesTimeRange)
         self.multi_waves_left_button.clicked.connect(lambda: self.moveMultiWavesTime(-1))
         self.multi_waves_right_button.clicked.connect(lambda: self.moveMultiWavesTime(1))
         self.multi_waves_up_button.clicked.connect(lambda: self.moveMultiWavesChannels(1))
@@ -636,6 +659,12 @@ class MainWindow(QMainWindow):
         controls_hbox.addWidget(Label('至'))
         controls_hbox.addWidget(self.multi_waves_channel_to_spin_box)
         controls_hbox.addWidget(self.multi_waves_confirm_button)
+        controls_hbox.addSpacing(15)
+        controls_hbox.addWidget(Label('显示时间'))
+        controls_hbox.addWidget(self.multi_waves_time_from_spin_box)
+        controls_hbox.addWidget(Label('至'))
+        controls_hbox.addWidget(self.multi_waves_time_to_spin_box)
+        controls_hbox.addWidget(self.multi_waves_time_confirm_button)
         controls_hbox.addSpacing(15)
         controls_hbox.addWidget(self.multi_waves_left_button)
         controls_hbox.addWidget(self.multi_waves_right_button)
@@ -652,6 +681,7 @@ class MainWindow(QMainWindow):
         vbox.addWidget(self.plot_multi_waves_widget)
         vbox.addLayout(controls_hbox)
         self.multi_waves_container.setLayout(vbox)
+        self.multi_waves_view_box.sigRangeChanged.connect(self.syncMultiWavesTimeRange)
         self.multi_waves_reset_pending = True
         self.multi_waves_colors = ['red', 'lime', 'deepskyblue', 'yellow', 'plum', 'gold', 'blue', 'fuchsia',
                                    'aqua', 'orange']
@@ -995,10 +1025,12 @@ class MainWindow(QMainWindow):
 
         """
         self.file_path_line_edit.setText(self.file_path)
+        self.file_path_line_edit.setToolTip(os.path.abspath(self.file_path))
         files = [f for f in os.listdir(self.file_path) if f.lower().endswith(DAS_FILE_SUFFIXES)]
         self.files_table_widget.setRowCount(len(files))  # 有多少个文件就显示多少行
         for i in range(len(files)):
             table_widget_item = QTableWidgetItem(files[i])
+            table_widget_item.setToolTip(os.path.abspath(os.path.join(self.file_path, files[i])))
             self.files_table_widget.setItem(i, 0, table_widget_item)
 
     def updateDataRange(self):
@@ -1021,7 +1053,7 @@ class MainWindow(QMainWindow):
 
         self.channel_number_spinbx.setRange(1, self.current_channels)
         self.channel_number_spinbx.setValue(self.channel_number)
-        self.sampling_rate_line_edit.setText(str(self.sampling_rate))
+        self.sampling_rate_line_edit.setText(f'{self.sampling_rate:g}')
         self.current_sampling_times_line_edit.setText(str(self.current_sampling_times))
         self.current_channels_line_edit.setText(str(self.current_channels))
 
@@ -1102,22 +1134,29 @@ class MainWindow(QMainWindow):
         suffix = suffixes.pop()
         first_file_path = self.dataFilePath(self.file_names[0])
         if suffix == '.bin':
-            first_header, sampling_time, channels_num, _ = read_bin_header(first_file_path)
-            sampling_rate = self.binSamplingRate(first_header)
+            first_header, sampling_time, channels_num, sampling_rate, _ = read_bin_header(first_file_path)
+            file_sampling_times = []
             for file in self.file_names:
                 file_path = self.dataFilePath(file)
-                header, file_sampling_time, file_channels_num, _ = read_bin_header(file_path)
+                header, file_sampling_time, file_channels_num, file_sampling_rate, _ = read_bin_header(file_path)
                 if file_channels_num != channels_num:
                     raise ValueError(f'{file_path}: 通道数不一致，期望 {channels_num}，实际 {file_channels_num}')
+                if not np.isclose(file_sampling_rate, sampling_rate):
+                    raise ValueError(f'{file_path}: 采样率不一致，期望 {sampling_rate:g}Hz，'
+                                     f'实际 {file_sampling_rate:g}Hz')
                 time.append(header[:6])  # GPS时间
-                data.append(bin2numpy(file_path, 0, channels_num).T)
+                data.append(bin2numpy(file_path, 0, channels_num))
+                file_sampling_times.append(file_sampling_time)
+
+            sampling_times_text = str(sampling_time) if len(set(file_sampling_times)) == 1 \
+                else '、'.join(map(str, file_sampling_times))
 
             self.acquisition_params = {
                 'GPS时间': f'{"-".join(f(time[0]))} 至 {"-".join(f(time[-1]))}',
                 '文件格式': '.bin',
-                '采样频率': f'{sampling_rate}Hz',
+                '采样频率': f'{sampling_rate:g}Hz',
                 '传感点数（通道数）': f'{channels_num}',
-                '单个文件采样点数': f'{sampling_time}',
+                '单个文件采样点数': sampling_times_text,
             }
 
         elif suffix == '.dat':
@@ -1230,17 +1269,6 @@ class MainWindow(QMainWindow):
         获取数据文件后缀。
         """
         return os.path.splitext(str(file_name))[1].lower()
-
-    def binSamplingRate(self, header):
-        """
-        从 .bin 头里读取采样率；缺失时沿用界面已有值，仍缺失则使用 1Hz。
-        """
-        sampling_rate = int(round(float(header[6]))) if len(header) > 6 and header[6] > 0 else 0
-        if sampling_rate > 0:
-            return sampling_rate
-        if self.sampling_rate_line_edit.text():
-            return int(self.sampling_rate_line_edit.text())
-        return 1
 
     def exportData(self):
         """
@@ -1580,7 +1608,8 @@ class MainWindow(QMainWindow):
         self.multi_waves_channel_min = self.channel_from_num
         self.multi_waves_channel_max = self.channel_to_num
         full_time_width = self.multi_waves_x_max - self.multi_waves_x_min
-        self.multi_waves_time_window_width = min(max(full_time_width / 5, 1 / self.sampling_rate), full_time_width)
+        min_time_window_width = min(1 / self.sampling_rate, full_time_width)
+        default_time_window_width = min(max(full_time_width / 5, min_time_window_width), full_time_width)
 
         previous_channel_from = self.multi_waves_channel_from_spin_box.value()
         previous_channel_to = self.multi_waves_channel_to_spin_box.value()
@@ -1590,9 +1619,13 @@ class MainWindow(QMainWindow):
             channel_from = self.multi_waves_channel_min
             channel_to = min(channel_from + 19, self.multi_waves_channel_max)
             self.multi_waves_time_from = self.multi_waves_x_min
+            self.multi_waves_time_window_width = default_time_window_width
         else:
             channel_from = max(self.multi_waves_channel_min, previous_channel_from)
             channel_to = min(self.multi_waves_channel_max, previous_channel_to)
+            self.multi_waves_time_window_width = min(
+                max(getattr(self, 'multi_waves_time_window_width', default_time_window_width),
+                    min_time_window_width), full_time_width)
             max_time_from = self.multi_waves_x_max - self.multi_waves_time_window_width
             self.multi_waves_time_from = min(max(getattr(self, 'multi_waves_time_from', self.multi_waves_x_min),
                                                   self.multi_waves_x_min), max_time_from)
@@ -1606,10 +1639,18 @@ class MainWindow(QMainWindow):
         self.multi_waves_channel_from_spin_box.blockSignals(False)
         self.multi_waves_channel_to_spin_box.blockSignals(False)
 
+        time_decimals = min(9, max(3, int(np.ceil(np.log10(max(self.sampling_rate, 1)))) + 1))
+        for spin_box in (self.multi_waves_time_from_spin_box, self.multi_waves_time_to_spin_box):
+            spin_box.blockSignals(True)
+            spin_box.setDecimals(time_decimals)
+            spin_box.setRange(self.multi_waves_x_min, self.multi_waves_x_max)
+            spin_box.setSingleStep(min_time_window_width)
+            spin_box.blockSignals(False)
+
         self.multi_waves_view_box.setLimits(
             xMin=self.multi_waves_x_min, xMax=self.multi_waves_x_max,
             yMin=self.multi_waves_channel_min - 0.5, yMax=self.multi_waves_channel_max + 0.5,
-            minXRange=min(self.multi_waves_time_window_width, full_time_width), maxXRange=full_time_width,
+            minXRange=min_time_window_width, maxXRange=full_time_width,
             minYRange=1, maxYRange=self.current_channels)
         self.multi_waves_reset_pending = False
         self.drawMultiWavesVisibleChannels()
@@ -1639,9 +1680,32 @@ class MainWindow(QMainWindow):
                     self.multi_waves_time_from + self.multi_waves_time_window_width),
             yRange=(channel_from - 0.5, channel_to + 0.5), padding=0)
         self.multi_waves_channel_range_label.setText(f'通道：{channel_from} - {channel_to}')
+        self.updateMultiWavesTimeDisplay()
+
+    def updateMultiWavesTimeDisplay(self):
+        """把当前时间窗口同步到输入框和提示文字。"""
+        time_to = self.multi_waves_time_from + self.multi_waves_time_window_width
+        self.multi_waves_time_from_spin_box.blockSignals(True)
+        self.multi_waves_time_to_spin_box.blockSignals(True)
+        self.multi_waves_time_from_spin_box.setValue(self.multi_waves_time_from)
+        self.multi_waves_time_to_spin_box.setValue(time_to)
+        self.multi_waves_time_from_spin_box.blockSignals(False)
+        self.multi_waves_time_to_spin_box.blockSignals(False)
         self.multi_waves_time_range_label.setText(
             f'时间：{self.multi_waves_time_from:.3f} - '
-            f'{self.multi_waves_time_from + self.multi_waves_time_window_width:.3f} s')
+            f'{time_to:.3f} s')
+
+    def syncMultiWavesTimeRange(self, _view_box, view_range):
+        """鼠标平移或缩放后，同步云图的时间窗口状态和输入框。"""
+        if not hasattr(self, 'multi_waves_x'):
+            return
+        time_from, time_to = view_range[0]
+        if time_to <= time_from:
+            return
+        self.multi_waves_time_from = max(time_from, self.multi_waves_x_min)
+        self.multi_waves_time_window_width = min(time_to - time_from,
+                                                  self.multi_waves_x_max - self.multi_waves_x_min)
+        self.updateMultiWavesTimeDisplay()
 
     def setMultiWavesChannelRange(self, channel_from: int, channel_to: int):
         """限制通道范围、同步输入框并重绘固定云图。"""
@@ -1665,6 +1729,22 @@ class MainWindow(QMainWindow):
             printError('起始通道不能大于结束通道')
             return
         self.drawMultiWavesVisibleChannels()
+
+    def confirmMultiWavesTimeRange(self):
+        """提交输入的时间起止范围，并在该范围内显示云图。"""
+        if not hasattr(self, 'multi_waves_x'):
+            return
+        self.multi_waves_time_from_spin_box.interpretText()
+        self.multi_waves_time_to_spin_box.interpretText()
+        time_from = self.multi_waves_time_from_spin_box.value()
+        time_to = self.multi_waves_time_to_spin_box.value()
+        minimum_width = min(1 / self.sampling_rate, self.multi_waves_x_max - self.multi_waves_x_min)
+        if time_to - time_from < minimum_width:
+            printError('结束时间必须至少比起始时间大一个采样间隔')
+            return
+        self.multi_waves_time_from = time_from
+        self.multi_waves_time_window_width = time_to - time_from
+        self.updateMultiWavesViewRange()
 
     def moveMultiWavesTime(self, direction: int):
         """按当前时间窗口宽度平移固定云图。"""

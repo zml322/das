@@ -180,8 +180,7 @@ class Base:
 
         first_file = self.file_path[0]
         if first_file.suffix.lower() == ".bin":
-            header, self.sampling_times, self.channels_num, _ = read_bin_header(first_file)
-            self.sampling_rate = int(round(float(header[6]))) if header[6] > 0 else 1
+            _header, self.sampling_times, self.channels_num, self.sampling_rate, _ = read_bin_header(first_file)
         else:
             raw_data = np.fromfile(first_file, dtype="<f4")
             self.sampling_rate = int(raw_data[6])
@@ -191,7 +190,11 @@ class Base:
         data = []
         for file in self.file_path:
             if file.suffix.lower() == ".bin":
-                header, sampling_times, channels_num, _ = read_bin_header(file)
+                _header, sampling_times, channels_num, sampling_rate, _ = read_bin_header(file)
+                if not np.isclose(sampling_rate, self.sampling_rate):
+                    printError(
+                        f"data file {file} has sampling rate: {sampling_rate}, while first data file has {self.sampling_rate}"
+                    )
                 if sampling_times != self.sampling_times:
                     printError(
                         f"data file {file} has sampling times: {sampling_times}, while first data file has {self.sampling_times}"
@@ -200,7 +203,7 @@ class Base:
                     printError(
                         f"data file {file} has channels: {channels_num}, while first data file has {self.channels_num}"
                     )
-                data.append(bin2numpy(file, 0, self.channels_num).T)
+                data.append(bin2numpy(file, 0, self.channels_num))
             else:
                 raw_data = np.fromfile(file, dtype="<f4")
                 data.append(raw_data[10:].reshape(self.channels_num, self.sampling_times))
@@ -213,9 +216,8 @@ class Base:
 
         """
         if self.noise.suffix.lower() == ".bin":
-            header, sampling_times, channels_num, _ = read_bin_header(self.noise)
-            sampling_rate = int(round(float(header[6]))) if header[6] > 0 else 1
-            noise_data = bin2numpy(self.noise, 0, channels_num).T
+            _header, sampling_times, channels_num, sampling_rate, _ = read_bin_header(self.noise)
+            noise_data = bin2numpy(self.noise, 0, channels_num)
         else:
             raw_data = np.fromfile(self.noise, dtype="<f4")
             sampling_rate = int(raw_data[6])

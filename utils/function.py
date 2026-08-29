@@ -135,7 +135,7 @@ def toAmplitude(data: np.array) -> np.array:
 def xAxis(num: int,
           begin: Optional[int] = None,
           end: Optional[int] = None,
-          sampling_rate: int = 1,
+          sampling_rate: float = 1,
           freq: bool = False) -> np.array:
     """
     生成绘制时域图的 x 轴
@@ -151,7 +151,10 @@ def xAxis(num: int,
     """
     if freq:
         return np.fft.fftfreq(num, 1 / sampling_rate)[:num // 2]
-    return np.linspace(begin, end, num) / sampling_rate
+    begin = 1 if begin is None else begin
+    end = begin + num - 1 if end is None else end
+    # 第一个采样点对应 0s；与 BIN notebook 的 np.arange(num) / fs 一致。
+    return np.linspace(begin - 1, end - 1, num) / sampling_rate
 
 
 def initCombinedPlotWidget(data: np.array,
