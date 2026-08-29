@@ -141,7 +141,13 @@ class MainWindow(QMainWindow):
         self.setWindowTitle('DAS数据查看')
         setPicture(self, icon_jpg, 'icon.jpg', window_icon=True)
 
-        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('myappid')  # 设置任务栏图标
+        # AppUserModelID 仅适用于 Windows；macOS/Linux 没有 ctypes.windll。
+        if sys.platform == 'win32':
+            try:
+                ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('myappid')
+            except (AttributeError, OSError):
+                # 任务栏图标设置失败不应影响主程序启动。
+                pass
 
     def initMenu(self):
         """

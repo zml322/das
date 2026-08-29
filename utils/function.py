@@ -6,6 +6,7 @@
 """
 import base64
 import os
+import tempfile
 from typing import Union, Optional
 
 import numpy as np
@@ -82,13 +83,20 @@ def setPicture(widget: QWidget, picture_code: str, picture_name: str, window_ico
     Returns:
 
     """
-    getPicture(picture_code, picture_name)  # 从image.py中获取图片信息生成图片
-    if window_icon:
-        widget.setWindowIcon(QIcon(picture_name))
-    else:
-        widget.setIcon(QIcon(picture_name))  # 加载图片
-        widget.setStyleSheet('background: white')
-    os.remove(picture_name)  # 移除图片释放内存
+    # Finder 启动的 macOS .app 的当前目录不固定，不能在其中创建临时图标文件。
+    # 统一写入系统临时目录，Windows、macOS 和 Linux 均可使用。
+    temporary_picture = os.path.join(
+        tempfile.gettempdir(), f'dasviewer-{os.getpid()}-{os.path.basename(picture_name)}')
+    getPicture(picture_code, temporary_picture)  # 从 image.py 中获取图片信息生成图片
+    try:
+        if window_icon:
+            widget.setWindowIcon(QIcon(temporary_picture))
+        else:
+            widget.setIcon(QIcon(temporary_picture))  # 加载图片
+            widget.setStyleSheet('background: white')
+    finally:
+        if os.path.exists(temporary_picture):
+            os.remove(temporary_picture)  # 移除临时图片
 
 
 def writeWav(path: str, data: np.array, sr: int) -> None:
