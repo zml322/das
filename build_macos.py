@@ -11,9 +11,12 @@ import subprocess
 import sys
 from pathlib import Path
 
+from utils.version import __version__
+
 
 PROJECT_ROOT = Path(__file__).resolve().parent
-APP_NAME = 'DASViewer'
+APP_VERSION = __version__
+APP_NAME = f'DASViewer-v{APP_VERSION}'
 BUNDLE_IDENTIFIER = 'com.dasviewer.app'
 
 

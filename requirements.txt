@@ -7,3 +7,4 @@ matplotlib
 pandas
 EMD-signal
 PyWavelets
+DASPy-toolbox>=1.2.7

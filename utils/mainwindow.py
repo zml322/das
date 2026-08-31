@@ -20,6 +20,7 @@ from scipy.integrate import cumulative_trapezoid
 from image.image import *
 from .classes.binary_image import BinaryImageHandler
 from .classes.data_sifting import DataSifting
+from .classes.das_filter import DASFilterDialog
 from .classes.emd import EMDHandler
 from .classes.feature import FeatureCalculator
 from .classes.filter import FilterHandler
@@ -30,6 +31,7 @@ from .classes.wavelet_packet import DWPTHandler
 from .bin_reader import bin2numpy, read_bin_header
 from .function import *
 from .widget import *
+from .version import __version__
 
 
 class MainWindow(QMainWindow):
@@ -109,6 +111,9 @@ class MainWindow(QMainWindow):
 
         # 滤波器
         self.filter = None
+        self.das_filter_dialog = None
+        self.raw_data = None
+        self._filter_dialog_original = None
 
         # 二值图
         self.binary_image = None
@@ -138,7 +143,7 @@ class MainWindow(QMainWindow):
         self.statusBar().setStyleSheet('font-size: 15px; font-family: "Times New Roman", "SimHei";')  # 状态栏
         self.menu_bar = self.menuBar()  # 菜单栏
         self.menu_bar.setStyleSheet('font-size: 17px; font-family: "Times New Roman", "SimHei";')
-        self.setWindowTitle('DAS数据查看')
+        self.setWindowTitle(f'DAS数据查看 v{__version__}')
         setPicture(self, icon_jpg, 'icon.jpg', window_icon=True)
 
         # AppUserModelID 仅适用于 Windows；macOS/Linux 没有 ctypes.windll。
@@ -322,6 +327,16 @@ class MainWindow(QMainWindow):
                                          '更新数据（否）',
                                          '如果为是，每次滤波后数据会更新',
                                          self.updateUpdateDataMenu)
+
+        self.das_filter_action = Action(self.filter_menu,
+                                        'DAS二维滤波与去噪',
+                                        '对选定的通道和采样点范围进行 DASPy 滤波与去噪',
+                                        self.showDASFilterDialog)
+        self.reset_das_filter_action = Action(self.filter_menu,
+                                              '恢复原始数据',
+                                              '撤销已应用的二维滤波与去噪结果',
+                                              self.resetDASFilterData,
+                                              enabled=False)
 
         self.filter_menu.addSeparator()
 
@@ -1019,6 +1034,8 @@ class MainWindow(QMainWindow):
         self.operation_menu.setEnabled(True)
         self.plot_menu.setEnabled(True)
         self.filter_menu.setEnabled(True)
+        self.das_filter_action.setEnabled(True)
+        self.reset_das_filter_action.setEnabled(self.raw_data is not None)
 
         setPicture(self.player_play_button, play_jpg, 'play.jpg')
         self.player_play_button.setDisabled(False)
@@ -1256,7 +1273,10 @@ class MainWindow(QMainWindow):
 
         self.time = time
         self.data = detrendData(np.concatenate(data, axis=1))  # （通道数，采样次数）
-        self.origin_data = self.data
+        # Keep an immutable baseline so the new two-dimensional filter dialog
+        # can preview, undo, and restore results without rereading the files.
+        self.raw_data = np.asarray(self.data, dtype=np.float32).copy()
+        self.origin_data = self.raw_data.copy()
         self.sampling_rate = sampling_rate
         self.channels_num = channels_num
         self.sampling_times = self.data.shape[1]
@@ -1837,6 +1857,68 @@ class MainWindow(QMainWindow):
             self.origin_data[self.channel_number - 1] = data
             self.data = self.origin_data
             self.updateImages()
+
+    def showDASFilterDialog(self):
+        """Open the two-dimensional DASPy-compatible filter dialog."""
+        if self.raw_data is None or not hasattr(self, 'origin_data'):
+            printError('请先导入 DAS 数据')
+            return
+
+        self._filter_dialog_original = np.asarray(self.origin_data, dtype=np.float32).copy()
+        visible_range = (
+            self.channel_from_num,
+            self.channel_to_num,
+            self.sampling_times_from_num,
+            self.sampling_times_to_num,
+        )
+        dialog = DASFilterDialog(
+            self.origin_data,
+            self.sampling_rate,
+            visible_range=visible_range,
+            parent=self,
+        )
+        self.das_filter_dialog = dialog
+        dialog.previewReady.connect(self.previewDASFilterData)
+        dialog.committed.connect(self.commitDASFilterData)
+        dialog.rejected.connect(self.cancelDASFilterData)
+        dialog.exec_()
+        self.das_filter_dialog = None
+        self._filter_dialog_original = None
+
+    def previewDASFilterData(self, data: np.ndarray, description: str = ''):
+        """Refresh all plots with a dialog preview without changing the baseline."""
+        self.origin_data = np.asarray(data, dtype=np.float32).copy()
+        self.updateDataRange()
+        self.updateImages()
+        if description:
+            self.statusBar().showMessage(f'预览：{description}', 8000)
+
+    def commitDASFilterData(self, data: np.ndarray):
+        """Commit the dialog result as the current working data."""
+        self.origin_data = np.asarray(data, dtype=np.float32).copy()
+        self.updateDataRange()
+        self.updateImages()
+        self.reset_das_filter_action.setEnabled(True)
+        self.statusBar().showMessage('二维滤波结果已应用；可从“滤波”菜单恢复原始数据。', 8000)
+
+    def cancelDASFilterData(self):
+        """Restore the data that was present before opening the dialog."""
+        if self._filter_dialog_original is None:
+            return
+        self.origin_data = self._filter_dialog_original.copy()
+        self.updateDataRange()
+        self.updateImages()
+        self.statusBar().showMessage('已取消二维滤波，恢复打开对话框前的数据。', 5000)
+
+    def resetDASFilterData(self):
+        """Restore the detrended data loaded from disk."""
+        if self.raw_data is None:
+            return
+        self.origin_data = np.asarray(self.raw_data, dtype=np.float32).copy()
+        self.updateDataRange()
+        self.updateImages()
+        self.reset_das_filter_action.setEnabled(False)
+        self.statusBar().showMessage('已恢复导入后的原始数据（包含现有去趋势步骤）。', 8000)
 
     # """------------------------------------------------------------------------------------------------------------"""
     """滤波-EMD调用函数"""

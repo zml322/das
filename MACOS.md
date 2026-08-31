@@ -36,6 +36,9 @@ open dist/macos/DASViewer.app
 python build_macos.py --target-architecture universal2
 ```
 
+构建脚本从 `utils/version.py` 读取版本号。当前版本为 `2.1.1`，产物会命名为
+`DASViewer-v2.1.1.app`，并放在 `dist/macos` 下。
+
 `universal2` 依赖所有 Python 扩展也提供通用二进制；若构建失败，请分别在 Apple 芯片和 Intel Mac 上构建对应架构的 `.app`。
 
 ## 图标与分发
