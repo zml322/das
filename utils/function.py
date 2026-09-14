@@ -30,7 +30,7 @@ def printError(err: Union[Exception, str]) -> None:
     Returns:
 
     """
-    QMessageBox.warning(None, '错误', f'<font face="Times New Roman" size="4">{err}</font>!', QMessageBox.Ok)
+    QMessageBox.warning(None, '错误', f'{err}!', QMessageBox.Ok)
 
 
 def writeImages(path: str) -> None:

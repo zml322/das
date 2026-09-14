@@ -37,8 +37,10 @@ ALGORITHM_LABELS = (
     ("lowpass", "低通滤波"),
     ("highpass", "高通滤波"),
     ("bandstop", "带阻滤波 / 工频抑制"),
+    ("fk", "F-K 扇形滤波"),
     ("spike", "尖峰噪声去除"),
     ("common_mode", "共模噪声去除"),
+    ("mad_normalize", "各通道 MAD 归一化"),
 )
 
 
@@ -133,6 +135,30 @@ def _fallback_common_mode(data: np.ndarray, method: str) -> np.ndarray:
     return data - projection[:, np.newaxis] * common[np.newaxis, :]
 
 
+def _mad_normalize_per_channel(data: np.ndarray) -> np.ndarray:
+    """Return robust z-scores using each channel's selected samples only."""
+
+    if not np.all(np.isfinite(data)):
+        raise ValueError("MAD 归一化输入不能包含 NaN 或无穷值")
+
+    # Use float64 intermediates so the median and scale estimate remain stable
+    # even though the viewer stores its data as float32.
+    values = np.asarray(data, dtype=np.float64)
+    medians = np.median(values, axis=1, keepdims=True)
+    mad = np.median(np.abs(values - medians), axis=1, keepdims=True)
+    robust_scale = 1.4826 * mad
+
+    # A channel with no variation has no defined scale.  Its centred signal is
+    # zero, so represent it as zeros instead of producing NaN or infinity.
+    normalized = np.zeros_like(values)
+    amplitudes = np.max(np.abs(values), axis=1, keepdims=True)
+    tolerance = np.finfo(np.float64).eps * np.maximum(
+        amplitudes, np.finfo(np.float64).tiny
+    )
+    np.divide(values - medians, robust_scale, out=normalized, where=mad > tolerance)
+    return normalized.astype(np.float32)
+
+
 def apply_das_filter(
     data: np.ndarray,
     sampling_rate: float,
@@ -185,6 +211,69 @@ def apply_das_filter(
             result = _fallback_iir(
                 array, sampling_rate, algorithm, frequency, order, zero_phase
             )
+    elif algorithm == "fk":
+        channel_spacing = float(parameters["channel_spacing"])
+        if channel_spacing <= 0:
+            raise ValueError("F-K 滤波需要大于 0 的相邻通道距离 dx（米）")
+
+        mode = str(parameters["fk_mode"])
+        if mode not in {"retain", "remove"}:
+            raise ValueError("F-K 模式只能是保留扇形或去除扇形")
+        direction = str(parameters["fk_direction"])
+        direction_flags = {
+            "both": 0,
+            # DASPy's flag excludes the specified sign from the fan mask.
+            # Invert it here so the UI labels retain their physical meaning.
+            "positive": -1,
+            "negative": 1,
+        }
+        if direction not in direction_flags:
+            raise ValueError("F-K 传播方向无效")
+
+        def optional_limit(name: str) -> Optional[float]:
+            value = float(parameters[name])
+            return value if value > 0 else None
+
+        fmin = optional_limit("fk_frequency_low")
+        fmax = optional_limit("fk_frequency_high")
+        vmin = optional_limit("fk_velocity_low")
+        vmax = optional_limit("fk_velocity_high")
+        nyquist = float(sampling_rate) / 2.0
+        if fmin is not None and fmin >= nyquist:
+            raise ValueError("F-K 频率下限必须小于 Nyquist 频率")
+        if fmax is not None and fmax >= nyquist:
+            raise ValueError("F-K 频率上限必须小于 Nyquist 频率")
+        if fmin is not None and fmax is not None and fmin >= fmax:
+            raise ValueError("F-K 频率下限必须小于频率上限")
+        if vmin is not None and vmax is not None and vmin >= vmax:
+            raise ValueError("F-K 表观速度下限必须小于速度上限")
+        if (
+            fmin is None
+            and fmax is None
+            and vmin is None
+            and vmax is None
+            and direction == "both"
+        ):
+            raise ValueError("请至少设置一个 F-K 频率/速度限制或传播方向")
+
+        try:
+            from daspy.advanced_tools import fk_filter  # type: ignore
+        except Exception as error:
+            raise RuntimeError("F-K 滤波需要可用的 DASPy advanced_tools") from error
+        result = fk_filter(
+            array,
+            dx=channel_spacing,
+            fs=float(sampling_rate),
+            taper=(0.02, 0.05),
+            pad="default",
+            mode=mode,
+            fmin=fmin,
+            fmax=fmax,
+            vmin=vmin,
+            vmax=vmax,
+            edge=0.1,
+            flag=direction_flags[direction],
+        )
     elif algorithm == "spike":
         channel_window = max(1, int(parameters["channel_window"]))
         sample_window = max(1, int(parameters["sample_window"]))
@@ -224,6 +313,8 @@ def apply_das_filter(
             result = _fallback_common_mode(array, method)
         else:
             result = common_mode_noise_removal(array, method=method)
+    elif algorithm == "mad_normalize":
+        result = _mad_normalize_per_channel(array)
     else:
         raise ValueError(f"不支持的滤波算法: {algorithm}")
 
@@ -271,6 +362,7 @@ class DASFilterDialog(QDialog):
         data: np.ndarray,
         sampling_rate: float,
         visible_range: Optional[Tuple[int, int, int, int]] = None,
+        settings: Optional[Dict[str, object]] = None,
         parent: Optional[QWidget] = None,
     ):
         super().__init__(parent)
@@ -293,6 +385,7 @@ class DASFilterDialog(QDialog):
         self._operation_count = 0
         self._syncing_range = False
         self._build_ui()
+        self._restore_filter_settings(settings)
 
     def _normalize_range(self, values: Tuple[int, int, int, int]):
         channel_from, channel_to, sample_from, sample_to = map(int, values)
@@ -427,17 +520,74 @@ class DASFilterDialog(QDialog):
         self.common_method.addItem("中位数", "median")
         self.common_method.addItem("均值", "mean")
         parameter_form.addRow("共模估计", self.common_method)
+
+        self.channel_spacing = QDoubleSpinBox()
+        self.channel_spacing.setRange(0.001, 100000.0)
+        self.channel_spacing.setDecimals(3)
+        self.channel_spacing.setSingleStep(0.1)
+        self.channel_spacing.setValue(1.0)
+        self.channel_spacing.setSuffix(" m")
+        parameter_form.addRow("相邻通道距离 dx", self.channel_spacing)
+
+        self.fk_mode = QComboBox()
+        self.fk_mode.addItem("保留扇形内信号", "retain")
+        self.fk_mode.addItem("去除扇形内信号", "remove")
+        parameter_form.addRow("F-K 操作", self.fk_mode)
+
+        self.fk_direction = QComboBox()
+        self.fk_direction.addItem("双向", "both")
+        self.fk_direction.addItem("仅保留正表观速度", "positive")
+        self.fk_direction.addItem("仅保留负表观速度", "negative")
+        parameter_form.addRow("传播方向", self.fk_direction)
+
+        self.fk_frequency_low = QDoubleSpinBox()
+        self.fk_frequency_high = QDoubleSpinBox()
+        for box in (self.fk_frequency_low, self.fk_frequency_high):
+            box.setRange(0.0, max(0.001, nyquist * 0.999))
+            box.setDecimals(3)
+            box.setSingleStep(1.0)
+            box.setSuffix(" Hz")
+        parameter_form.addRow("F-K 频率下限", self.fk_frequency_low)
+        parameter_form.addRow("F-K 频率上限", self.fk_frequency_high)
+
+        self.fk_velocity_low = QDoubleSpinBox()
+        self.fk_velocity_high = QDoubleSpinBox()
+        for box in (self.fk_velocity_low, self.fk_velocity_high):
+            box.setRange(0.0, 1000000.0)
+            box.setDecimals(1)
+            box.setSingleStep(10.0)
+            box.setSuffix(" m/s")
+        parameter_form.addRow("表观速度下限", self.fk_velocity_low)
+        parameter_form.addRow("表观速度上限", self.fk_velocity_high)
+
+        self.fk_hint = QLabel(
+            "F-K：频率和速度填 0 表示不限制；至少设置一个限制或方向。"
+            "dx 必须是实际相邻通道距离，不是 gauge length。"
+        )
+        self.fk_hint.setWordWrap(True)
+        self.fk_hint.setStyleSheet("color: #555;")
+        parameter_form.addRow("", self.fk_hint)
         root.addWidget(parameter_group)
 
         self.status_label = QLabel("修改参数后点击“应用并预览”；可连续应用多个步骤。")
         self.status_label.setWordWrap(True)
         root.addWidget(self.status_label)
+        close_hint = QLabel(
+            "提示：成功预览后，点“确定并关闭”或右上角 × 都会保留结果；"
+            "“取消并还原”会撤销本次会话中的全部滤波。"
+        )
+        close_hint.setWordWrap(True)
+        close_hint.setStyleSheet("color: #555;")
+        root.addWidget(close_hint)
 
         button_row = QHBoxLayout()
         self.apply_button = QPushButton("应用并预览")
         self.reset_button = QPushButton("恢复本次会话")
         self.accept_button = QPushButton("确定并关闭")
         self.cancel_button = QPushButton("取消")
+        self.accept_button.setToolTip("保留当前预览结果并关闭窗口")
+        self.cancel_button.setText("取消并还原")
+        self.cancel_button.setToolTip("撤销本次会话中的全部滤波，并恢复到打开窗口前的数据")
         self.apply_button.clicked.connect(self._start_filter)
         self.reset_button.clicked.connect(self._reset)
         self.accept_button.clicked.connect(self.accept)
@@ -455,6 +605,73 @@ class DASFilterDialog(QDialog):
         self._update_range_controls()
         self._update_range_info()
 
+    def filter_settings(self) -> Dict[str, object]:
+        """Return the algorithm settings to reuse while the same file is open."""
+        return {
+            "algorithm": self.algorithm_combo.currentData(),
+            "frequency_low": self.frequency_low.value(),
+            "frequency_high": self.frequency_high.value(),
+            "frequency": self.frequency.value(),
+            "order": self.order.value(),
+            "zero_phase": self.zero_phase.isChecked(),
+            "channel_window": self.channel_window.value(),
+            "sample_window": self.sample_window.value(),
+            "threshold": self.threshold.value(),
+            "common_method": self.common_method.currentData(),
+            "channel_spacing": self.channel_spacing.value(),
+            "fk_mode": self.fk_mode.currentData(),
+            "fk_direction": self.fk_direction.currentData(),
+            "fk_frequency_low": self.fk_frequency_low.value(),
+            "fk_frequency_high": self.fk_frequency_high.value(),
+            "fk_velocity_low": self.fk_velocity_low.value(),
+            "fk_velocity_high": self.fk_velocity_high.value(),
+        }
+
+    def _restore_filter_settings(self, settings: Optional[Dict[str, object]]) -> None:
+        """Restore valid settings saved by the main window for this file."""
+        if not settings:
+            return
+
+        algorithm_index = self.algorithm_combo.findData(settings.get("algorithm"))
+        if algorithm_index >= 0:
+            self.algorithm_combo.setCurrentIndex(algorithm_index)
+        common_method_index = self.common_method.findData(
+            settings.get("common_method")
+        )
+        if common_method_index >= 0:
+            self.common_method.setCurrentIndex(common_method_index)
+        fk_mode_index = self.fk_mode.findData(settings.get("fk_mode"))
+        if fk_mode_index >= 0:
+            self.fk_mode.setCurrentIndex(fk_mode_index)
+        fk_direction_index = self.fk_direction.findData(settings.get("fk_direction"))
+        if fk_direction_index >= 0:
+            self.fk_direction.setCurrentIndex(fk_direction_index)
+
+        def restore_value(widget, name: str, converter) -> None:
+            if name not in settings:
+                return
+            try:
+                widget.setValue(converter(settings[name]))
+            except (TypeError, ValueError):
+                return
+
+        restore_value(self.frequency_low, "frequency_low", float)
+        restore_value(self.frequency_high, "frequency_high", float)
+        restore_value(self.frequency, "frequency", float)
+        restore_value(self.order, "order", int)
+        restore_value(self.channel_window, "channel_window", int)
+        restore_value(self.sample_window, "sample_window", int)
+        restore_value(self.threshold, "threshold", float)
+        restore_value(self.channel_spacing, "channel_spacing", float)
+        restore_value(self.fk_frequency_low, "fk_frequency_low", float)
+        restore_value(self.fk_frequency_high, "fk_frequency_high", float)
+        restore_value(self.fk_velocity_low, "fk_velocity_low", float)
+        restore_value(self.fk_velocity_high, "fk_velocity_high", float)
+        if isinstance(settings.get("zero_phase"), bool):
+            self.zero_phase.setChecked(settings["zero_phase"])
+
+        self._update_parameter_visibility()
+
     def _update_parameter_visibility(self) -> None:
         algorithm = self.algorithm_combo.currentData()
         frequency_pair = algorithm in {"bandpass", "bandstop"}
@@ -470,6 +687,9 @@ class DASFilterDialog(QDialog):
         for row in (5, 6, 7):
             self._set_form_row_visible(form, row, spike_visible)
         self._set_form_row_visible(form, 8, algorithm == "common_mode")
+        fk_visible = algorithm == "fk"
+        for row in range(9, 17):
+            self._set_form_row_visible(form, row, fk_visible)
 
     @staticmethod
     def _set_form_row_visible(layout, row: int, visible: bool) -> None:
@@ -579,6 +799,18 @@ class DASFilterDialog(QDialog):
                 "sample_window": self.sample_window.value(),
                 "threshold": self.threshold.value(),
             }
+        if algorithm == "fk":
+            return {
+                "channel_spacing": self.channel_spacing.value(),
+                "fk_mode": self.fk_mode.currentData(),
+                "fk_direction": self.fk_direction.currentData(),
+                "fk_frequency_low": self.fk_frequency_low.value(),
+                "fk_frequency_high": self.fk_frequency_high.value(),
+                "fk_velocity_low": self.fk_velocity_low.value(),
+                "fk_velocity_high": self.fk_velocity_high.value(),
+            }
+        if algorithm == "mad_normalize":
+            return {}
         return {"method": self.common_method.currentData()}
 
     def _start_filter(self) -> None:
@@ -654,3 +886,22 @@ class DASFilterDialog(QDialog):
         if self._worker is not None and self._worker.isRunning():
             return
         super().reject()
+
+    def closeEvent(self, event) -> None:
+        """Keep a completed preview when the title-bar close button is used.
+
+        The explicit Cancel button (and Escape) still call ``reject()`` and
+        therefore let the main window restore the data from before this dialog
+        was opened.  Closing with the title-bar button is treated like Accept
+        only after at least one filter operation completed successfully.
+        """
+        if self._worker is not None and self._worker.isRunning():
+            event.ignore()
+            return
+
+        if self._operation_count > 0:
+            self.accept()
+            event.accept()
+            return
+
+        super().closeEvent(event)

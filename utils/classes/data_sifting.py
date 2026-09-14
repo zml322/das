@@ -19,6 +19,7 @@ from scipy.signal.windows import *
 
 from ..bin_reader import bin2numpy, read_bin_header
 from ..function import DAS_FILE_FILTER, printError, setPicture
+from ..theme import ui_font_family
 from ..widget import Dialog, Label, TextEdit, PushButton, LineEditWithReg, ComboBox, CheckBox
 
 
@@ -113,13 +114,13 @@ class Base:
         初始化rc.Params
         Returns:
         """
-        plt.rcParams["font.sans-serif"] = ["SimHei", "Times New Roman"]  # 显示中文
+        plt.rcParams["font.sans-serif"] = [ui_font_family(), "Microsoft YaHei", "DejaVu Sans"]
         plt.rcParams["axes.unicode_minus"] = False  # 显示负号
-        plt.rcParams["axes.labelsize"] = 16
-        plt.rcParams["axes.titlesize"] = 24
-        plt.rcParams["xtick.labelsize"] = 12
-        plt.rcParams["ytick.labelsize"] = 12
-        plt.rcParams["legend.fontsize"] = 16
+        plt.rcParams["axes.labelsize"] = 10
+        plt.rcParams["axes.titlesize"] = 12
+        plt.rcParams["xtick.labelsize"] = 9
+        plt.rcParams["ytick.labelsize"] = 9
+        plt.rcParams["legend.fontsize"] = 10
 
     @staticmethod
     def _detrend_data(data: np.array) -> np.array:

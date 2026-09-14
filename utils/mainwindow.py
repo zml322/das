@@ -13,7 +13,8 @@ import pandas as pd
 from PyQt5 import QtMultimedia
 from PyQt5.QtCore import QUrl, QEvent, QRectF
 from PyQt5.QtWidgets import QApplication, QMainWindow, QFileDialog, qApp, QTabWidget, QTableWidget, QAbstractItemView, \
-    QTableWidgetItem, QHeaderView, QTabBar, QScrollBar, QHBoxLayout, QDoubleSpinBox, QSplitter
+    QTableWidgetItem, QHeaderView, QTabBar, QScrollBar, QHBoxLayout, QDoubleSpinBox, QSplitter, QVBoxLayout, QWidget, \
+    QFormLayout, QGroupBox
 from matplotlib import pyplot as plt
 from scipy.integrate import cumulative_trapezoid
 
@@ -21,15 +22,18 @@ from image.image import *
 from .classes.binary_image import BinaryImageHandler
 from .classes.data_sifting import DataSifting
 from .classes.das_filter import DASFilterDialog
+from .classes.daspy_converter_dialog import DASPyConverterDialog
 from .classes.emd import EMDHandler
 from .classes.feature import FeatureCalculator
 from .classes.filter import FilterHandler
 from .classes.snr import SNRCalculator
 from .classes.spectrum import SpectrumHandler
+from .classes.vehicle_tracking_dialog import VehicleTrackingDialog
 from .classes.wavelet import DWTHandler, CWTHandler
 from .classes.wavelet_packet import DWPTHandler
 from .bin_reader import bin2numpy, read_bin_header
 from .function import *
+from .theme import PLOT_LABEL_POINT_SIZE, PLOT_TICK_POINT_SIZE, PLOT_TITLE_POINT_SIZE, plot_font, plot_html, ui_font_family
 from .widget import *
 from .version import __version__
 
@@ -68,12 +72,12 @@ class MainWindow(QMainWindow):
 
         """
         # plt绘图参数
-        plt.rcParams['font.sans-serif'] = ['SimHei', 'Times New Roman']
+        plt.rcParams['font.sans-serif'] = [ui_font_family(), 'Microsoft YaHei', 'DejaVu Sans']
         plt.rcParams['axes.unicode_minus'] = False
-        plt.rcParams['axes.labelsize'] = 12
-        plt.rcParams['axes.titlesize'] = 18
-        plt.rcParams['xtick.labelsize'] = 10
-        plt.rcParams['ytick.labelsize'] = 10
+        plt.rcParams['axes.labelsize'] = 10
+        plt.rcParams['axes.titlesize'] = 12
+        plt.rcParams['xtick.labelsize'] = 9
+        plt.rcParams['ytick.labelsize'] = 9
 
         # pg组件设置
         pg.setConfigOptions(leftButtonPan=True)  # 设置可用鼠标缩放
@@ -114,6 +118,10 @@ class MainWindow(QMainWindow):
         self.das_filter_dialog = None
         self.raw_data = None
         self._filter_dialog_original = None
+        self._das_filter_settings = None
+        self._vehicle_tracking_settings = None
+        self.vehicle_trajectories = []
+        self._hide_vehicle_trajectories = False
 
         # 二值图
         self.binary_image = None
@@ -140,9 +148,7 @@ class MainWindow(QMainWindow):
         Returns:
 
         """
-        self.statusBar().setStyleSheet('font-size: 15px; font-family: "Times New Roman", "SimHei";')  # 状态栏
         self.menu_bar = self.menuBar()  # 菜单栏
-        self.menu_bar.setStyleSheet('font-size: 17px; font-family: "Times New Roman", "SimHei";')
         self.setWindowTitle(f'DAS数据查看 v{__version__}')
         setPicture(self, icon_jpg, 'icon.jpg', window_icon=True)
 
@@ -176,6 +182,13 @@ class MainWindow(QMainWindow):
                                     '导出数据',
                                     self.exportData,
                                     shortcut='Ctrl+E')
+
+        self.daspy_convert_action = Action(
+            self.file_menu,
+            'BIN 转 DASPy 格式',
+            '将项目 BIN 文件转换为 DASPy 支持的格式，并手动填写元数据',
+            self.showDASPyConverterDialog,
+        )
 
         self.file_menu.addSeparator()
 
@@ -340,6 +353,15 @@ class MainWindow(QMainWindow):
 
         self.filter_menu.addSeparator()
 
+        # Vehicle trajectories are a non-destructive analysis result, not a filter.
+        self.analysis_menu = Menu(self.menu_bar, '分析', enabled=False)
+        self.vehicle_tracking_action = Action(
+            self.analysis_menu,
+            '车辆轨迹拾取',
+            '使用低频峰值和卡尔曼跟踪拾取车辆时空轨迹',
+            self.showVehicleTrackingDialog,
+        )
+
         # 滤波-EMD
         self.emd_menu = Menu(self.filter_menu, 'EMD', status_tip='使用EMD及衍生方式滤波')
 
@@ -421,32 +443,38 @@ class MainWindow(QMainWindow):
         Returns:
 
         """
-        # 设置主窗口layout
         main_window_widget = QWidget()
-        main_window_vbox = QVBoxLayout()
         main_window_hbox = QHBoxLayout()
+        main_window_hbox.setContentsMargins(8, 8, 8, 8)
+        main_window_hbox.setSpacing(8)
 
-        # 左侧
-        # 文件区
+        # 左侧导航：目录和文件列表始终可见，数据概览与其归在一起。
         file_hbox = QHBoxLayout()
         file_area_vbox = QVBoxLayout()
-        file_path_label = Label('文件路径')
+        file_area_vbox.setContentsMargins(0, 0, 0, 0)
+        file_area_vbox.setSpacing(8)
+
+        file_area_title = Label('数据文件')
+        file_area_title.setObjectName('sectionTitle')
         self.file_path_line_edit = LineEdit(focus=False)
+        self.file_path_line_edit.setPlaceholderText('选择数据文件夹')
 
         change_file_path_button = PushButton()
         setPicture(change_file_path_button, folder_jpg, 'folder.jpg', )
+        change_file_path_button.setToolTip('选择数据文件夹')
+        change_file_path_button.setAccessibleName('选择数据文件夹')
         change_file_path_button.clicked.connect(self.changeFilePath)
 
         file_table_scrollbar = QScrollBar(Qt.Vertical)
         file_table_scrollbar.setStyleSheet('min-height: 100')  # 设置滚动滑块的最小高度
         self.files_table_widget = QTableWidget(30, 1)
         self.files_table_widget.setVerticalScrollBar(file_table_scrollbar)
-        self.files_table_widget.setStyleSheet('font-size: 17px; font-family: "Times New Roman", "Microsoft YaHei";')
         self.files_table_widget.setEditTriggers(QAbstractItemView.NoEditTriggers)  # 设置表格不可编辑
         self.files_table_widget.setHorizontalHeaderLabels(['文件'])  # 设置表头
         self.files_table_widget.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.files_table_widget.verticalHeader().setVisible(False)
         self.files_table_widget.setWordWrap(False)
+        self.files_table_widget.setAlternatingRowColors(True)
         self.files_table_widget.setToolTip('鼠标悬停在文件名上可查看完整路径')
         QTableWidget.resizeRowsToContents(self.files_table_widget)
         self.files_table_widget.setSelectionBehavior(QAbstractItemView.SelectRows)  # 设置一次选中一排内容
@@ -455,25 +483,43 @@ class MainWindow(QMainWindow):
         # 文件区布局
         file_hbox.addWidget(self.file_path_line_edit)
         file_hbox.addWidget(change_file_path_button)
-        file_area_vbox.addWidget(file_path_label)
+        file_area_vbox.addWidget(file_area_title)
         file_area_vbox.addLayout(file_hbox)
-        file_area_vbox.addWidget(self.files_table_widget)
+        file_area_vbox.addWidget(self.files_table_widget, 1)
 
-        # 右侧
-        # 参数
-        sampling_rate_label = Label('采样率')
+        # 数据元信息移至导航区，避免长期挤占绘图区的上下空间。
         self.sampling_rate_line_edit = LineEditWithReg(digit=True, focus=False)
-
-        sampling_times_label = Label('采样次数')
         self.current_sampling_times_line_edit = LineEditWithReg(focus=False)
-
-        number_of_channels_label = Label('通道数')
         self.current_channels_line_edit = LineEditWithReg(focus=False)
+        self.gps_from_line_edit = LineEdit(focus=False)
+        self.gps_to_line_edit = LineEdit(focus=False)
+        for field in (
+                self.sampling_rate_line_edit,
+                self.current_sampling_times_line_edit,
+                self.current_channels_line_edit,
+                self.gps_from_line_edit,
+                self.gps_to_line_edit,
+        ):
+            field.setReadOnly(True)
 
+        overview_group = QGroupBox('数据概览')
+        overview_form = QFormLayout()
+        overview_form.setContentsMargins(8, 8, 8, 8)
+        overview_form.setHorizontalSpacing(8)
+        overview_form.setVerticalSpacing(6)
+        overview_form.addRow('采样率', self.sampling_rate_line_edit)
+        overview_form.addRow('采样次数', self.current_sampling_times_line_edit)
+        overview_form.addRow('通道数', self.current_channels_line_edit)
+        overview_form.addRow('起始 GPS', self.gps_from_line_edit)
+        overview_form.addRow('结束 GPS', self.gps_to_line_edit)
+        overview_group.setLayout(overview_form)
+        file_area_vbox.addWidget(overview_group)
+
+        # 单通道操作只在“单通道”页中显示。
         channel_number_label = Label('通道号')
         self.channel_number_spinbx = SpinBox()
         self.channel_number_spinbx.setValue(1)
-        self.channel_number_spinbx.setMinimumWidth(100)
+        self.channel_number_spinbx.setMinimumWidth(88)
         self.channel_number_spinbx.valueChanged.connect(self.changeChannelNumber)
         self.channel_number_spinbx.valueChanged.connect(self.plotSingleChannelTime)
         self.channel_number_spinbx.valueChanged.connect(self.plotAmplitudeFrequency)
@@ -493,25 +539,17 @@ class MainWindow(QMainWindow):
         self.player_play_button.setDisabled(True)
         self.player_stop_button.setDisabled(True)  # 默认不可选中
 
-        # 数据参数布局
-        data_params_hbox = QHBoxLayout()
-        data_params_hbox.addWidget(channel_number_label)
-        data_params_hbox.addWidget(self.channel_number_spinbx)
-        data_params_hbox.addSpacing(20)
-        data_params_hbox.addWidget(self.player_play_button)
-        data_params_hbox.addSpacing(5)
-        data_params_hbox.addWidget(self.player_stop_button)
-        data_params_hbox.addSpacing(20)
-        data_params_hbox.addWidget(sampling_rate_label)
-        data_params_hbox.addWidget(self.sampling_rate_line_edit)
-        data_params_hbox.addSpacing(5)
-        data_params_hbox.addWidget(sampling_times_label)
-        data_params_hbox.addWidget(self.current_sampling_times_line_edit)
-        data_params_hbox.addSpacing(5)
-        data_params_hbox.addWidget(number_of_channels_label)
-        data_params_hbox.addWidget(self.current_channels_line_edit)
+        channel_controls_hbox = QHBoxLayout()
+        channel_controls_hbox.setContentsMargins(0, 0, 0, 0)
+        channel_controls_hbox.setSpacing(6)
+        channel_controls_hbox.addWidget(channel_number_label)
+        channel_controls_hbox.addWidget(self.channel_number_spinbx)
+        channel_controls_hbox.addSpacing(10)
+        channel_controls_hbox.addWidget(self.player_play_button)
+        channel_controls_hbox.addWidget(self.player_stop_button)
+        channel_controls_hbox.addStretch(1)
 
-        # 图像颜色控制
+        # 灰度图显示控制只在灰度图页面显示。
         image_colormap_label = Label('图像颜色')
         self.image_colormap_combx = ComboBox()
         self.image_colormap_combx.addItems(['灰度', 'RdBu', 'viridis', 'plasma', 'inferno', 'magma', 'turbo',
@@ -553,6 +591,13 @@ class MainWindow(QMainWindow):
 
         # 绘制灰度图
         self.plot_gray_scale_widget = MyPlotWidget('灰度图', '时间（s）', '通道', check_mouse=False)
+        gray_scale_container = QWidget()
+        gray_scale_vbox = QVBoxLayout()
+        gray_scale_vbox.setContentsMargins(6, 6, 6, 6)
+        gray_scale_vbox.setSpacing(6)
+        gray_scale_vbox.addLayout(image_controls_hbox)
+        gray_scale_vbox.addWidget(self.plot_gray_scale_widget)
+        gray_scale_container.setLayout(gray_scale_vbox)
 
         # 绘制单通道相位差-时间图
         self.plot_single_channel_time_widget = MyPlotWidget('相位差图', '时间（s）', '相位差（rad）', grid=True)
@@ -562,16 +607,18 @@ class MainWindow(QMainWindow):
 
         combine_image_widget = QWidget()
         image_vbox = QVBoxLayout()
+        image_vbox.setContentsMargins(6, 6, 6, 6)
+        image_vbox.setSpacing(6)
+        image_vbox.addLayout(channel_controls_hbox)
         image_vbox.addWidget(self.plot_single_channel_time_widget)
         image_vbox.addWidget(self.plot_amplitude_frequency_widget)
         combine_image_widget.setLayout(image_vbox)
 
         self.tab_widget = QTabWidget()
         self.tab_widget.setMovable(True)  # 设置tab可移动
-        self.tab_widget.setStyleSheet('font-size: 15px; font-family: "Times New Roman", "Microsoft YaHei";')
         self.tab_widget.setTabsClosable(True)  # 设置tab可关闭
         self.tab_widget.tabCloseRequested[int].connect(self.removeTab)
-        self.tab_widget.addTab(self.plot_gray_scale_widget, '灰度图')
+        self.tab_widget.addTab(gray_scale_container, '灰度图')
         self.tab_widget.addTab(combine_image_widget, '单通道')
         self.initMultiWavesTab()
         self.tab_widget.addTab(self.multi_waves_container, '多通道云图')
@@ -579,33 +626,14 @@ class MainWindow(QMainWindow):
         self.tab_widget.tabBar().setTabButton(1, QTabBar.RightSide, None)  # 设置删除按钮消失
         self.tab_widget.tabBar().setTabButton(2, QTabBar.RightSide, None)
 
-        # GPS时间组件
-        gps_from_label = Label('始')
-        gps_to_label = Label('止')
-        self.gps_from_line_edit = LineEdit(focus=False)
-        self.gps_to_line_edit = LineEdit(focus=False)
-
-        # GPS时间布局
-        gps_hbox = QHBoxLayout()
-        gps_hbox.addWidget(gps_from_label)
-        gps_hbox.addWidget(self.gps_from_line_edit)
-        gps_hbox.addSpacing(50)
-        gps_hbox.addWidget(gps_to_label)
-        gps_hbox.addWidget(self.gps_to_line_edit)
-
-        # 右侧布局
-        main_window_vbox.addSpacing(10)
-        main_window_vbox.addLayout(data_params_hbox)
-        main_window_vbox.addSpacing(6)
-        main_window_vbox.addLayout(image_controls_hbox)
-        main_window_vbox.addSpacing(10)
+        # Tab 是唯一的主工作区，最大化图形可用面积。
+        main_window_vbox = QVBoxLayout()
+        main_window_vbox.setContentsMargins(0, 0, 0, 0)
+        main_window_vbox.setSpacing(0)
         main_window_vbox.addWidget(self.tab_widget)
-        main_window_vbox.addSpacing(10)
-        main_window_vbox.addLayout(gps_hbox)
 
-        # 主页面
         file_area_widget = QWidget()
-        file_area_widget.setMinimumWidth(320)
+        file_area_widget.setMinimumWidth(280)
         file_area_widget.setLayout(file_area_vbox)
 
         content_widget = QWidget()
@@ -619,7 +647,7 @@ class MainWindow(QMainWindow):
         self.main_splitter.addWidget(content_widget)
         self.main_splitter.setStretchFactor(0, 0)
         self.main_splitter.setStretchFactor(1, 1)
-        self.main_splitter.setSizes([520, 1000])
+        self.main_splitter.setSizes([300, 1000])
 
         main_window_hbox.addWidget(self.main_splitter)
         main_window_widget.setLayout(main_window_hbox)
@@ -629,11 +657,11 @@ class MainWindow(QMainWindow):
         """创建固定的多通道云图页；数据变化时只重绘，不重复创建 Tab。"""
         self.multi_waves_view_box = pg.ViewBox(enableMenu=False)
         self.plot_multi_waves_widget = pg.PlotWidget(viewBox=self.multi_waves_view_box)
-        self.plot_multi_waves_widget.setTitle('<font face="Microsoft YaHei" size="5">多通道云图</font>')
-        self.plot_multi_waves_widget.setLabel('bottom', '<font face="Microsoft YaHei" size="3">时间（s）</font>')
-        self.plot_multi_waves_widget.setLabel('left', '<font face="Microsoft YaHei" size="3">通道</font>')
-        self.plot_multi_waves_widget.getAxis('bottom').setTickFont(QFont('Times New Roman'))
-        self.plot_multi_waves_widget.getAxis('left').setTickFont(QFont('Times New Roman'))
+        self.plot_multi_waves_widget.setTitle(plot_html('多通道云图', PLOT_TITLE_POINT_SIZE))
+        self.plot_multi_waves_widget.setLabel('bottom', plot_html('时间（s）', PLOT_LABEL_POINT_SIZE))
+        self.plot_multi_waves_widget.setLabel('left', plot_html('通道', PLOT_LABEL_POINT_SIZE))
+        self.plot_multi_waves_widget.getAxis('bottom').setTickFont(plot_font(PLOT_TICK_POINT_SIZE))
+        self.plot_multi_waves_widget.getAxis('left').setTickFont(plot_font(PLOT_TICK_POINT_SIZE))
         self.plot_multi_waves_widget.getAxis('left').setWidth(50)
         self.plot_multi_waves_widget.showGrid(x=True, y=True, alpha=0.2)
 
@@ -653,7 +681,6 @@ class MainWindow(QMainWindow):
             spin_box.setFixedWidth(110)
             spin_box.setKeyboardTracking(False)
             spin_box.setSuffix(' s')
-            spin_box.setStyleSheet('font-size: 17px; font-family: "Times New Roman", "Microsoft YaHei";')
         self.multi_waves_time_confirm_button = PushButton('确认时间')
         self.multi_waves_left_button = PushButton('←')
         self.multi_waves_right_button = PushButton('→')
@@ -674,33 +701,43 @@ class MainWindow(QMainWindow):
         self.multi_waves_up_button.clicked.connect(lambda: self.moveMultiWavesChannels(1))
         self.multi_waves_down_button.clicked.connect(lambda: self.moveMultiWavesChannels(-1))
 
-        controls_hbox = QHBoxLayout()
-        controls_hbox.addWidget(Label('显示通道'))
-        controls_hbox.addWidget(self.multi_waves_channel_from_spin_box)
-        controls_hbox.addWidget(Label('至'))
-        controls_hbox.addWidget(self.multi_waves_channel_to_spin_box)
-        controls_hbox.addWidget(self.multi_waves_confirm_button)
-        controls_hbox.addSpacing(15)
-        controls_hbox.addWidget(Label('显示时间'))
-        controls_hbox.addWidget(self.multi_waves_time_from_spin_box)
-        controls_hbox.addWidget(Label('至'))
-        controls_hbox.addWidget(self.multi_waves_time_to_spin_box)
-        controls_hbox.addWidget(self.multi_waves_time_confirm_button)
-        controls_hbox.addSpacing(15)
-        controls_hbox.addWidget(self.multi_waves_left_button)
-        controls_hbox.addWidget(self.multi_waves_right_button)
-        controls_hbox.addWidget(self.multi_waves_up_button)
-        controls_hbox.addWidget(self.multi_waves_down_button)
-        controls_hbox.addSpacing(15)
-        controls_hbox.addWidget(self.multi_waves_channel_range_label)
-        controls_hbox.addSpacing(15)
-        controls_hbox.addWidget(self.multi_waves_time_range_label)
-        controls_hbox.addStretch(1)
+        selection_controls_hbox = QHBoxLayout()
+        selection_controls_hbox.setContentsMargins(0, 0, 0, 0)
+        selection_controls_hbox.setSpacing(6)
+        selection_controls_hbox.addWidget(Label('显示通道'))
+        selection_controls_hbox.addWidget(self.multi_waves_channel_from_spin_box)
+        selection_controls_hbox.addWidget(Label('至'))
+        selection_controls_hbox.addWidget(self.multi_waves_channel_to_spin_box)
+        selection_controls_hbox.addWidget(self.multi_waves_confirm_button)
+        selection_controls_hbox.addSpacing(12)
+        selection_controls_hbox.addWidget(Label('显示时间'))
+        selection_controls_hbox.addWidget(self.multi_waves_time_from_spin_box)
+        selection_controls_hbox.addWidget(Label('至'))
+        selection_controls_hbox.addWidget(self.multi_waves_time_to_spin_box)
+        selection_controls_hbox.addWidget(self.multi_waves_time_confirm_button)
+        selection_controls_hbox.addStretch(1)
+
+        navigation_controls_hbox = QHBoxLayout()
+        navigation_controls_hbox.setContentsMargins(0, 0, 0, 0)
+        navigation_controls_hbox.setSpacing(6)
+        navigation_controls_hbox.addWidget(Label('浏览'))
+        navigation_controls_hbox.addWidget(self.multi_waves_left_button)
+        navigation_controls_hbox.addWidget(self.multi_waves_right_button)
+        navigation_controls_hbox.addWidget(self.multi_waves_up_button)
+        navigation_controls_hbox.addWidget(self.multi_waves_down_button)
+        navigation_controls_hbox.addSpacing(12)
+        navigation_controls_hbox.addWidget(self.multi_waves_channel_range_label)
+        navigation_controls_hbox.addSpacing(12)
+        navigation_controls_hbox.addWidget(self.multi_waves_time_range_label)
+        navigation_controls_hbox.addStretch(1)
 
         self.multi_waves_container = QWidget()
         vbox = QVBoxLayout()
+        vbox.setContentsMargins(6, 6, 6, 6)
+        vbox.setSpacing(6)
+        vbox.addLayout(selection_controls_hbox)
+        vbox.addLayout(navigation_controls_hbox)
         vbox.addWidget(self.plot_multi_waves_widget)
-        vbox.addLayout(controls_hbox)
         self.multi_waves_container.setLayout(vbox)
         self.multi_waves_view_box.sigRangeChanged.connect(self.syncMultiWavesTimeRange)
         self.multi_waves_reset_pending = True
@@ -829,12 +866,13 @@ class MainWindow(QMainWindow):
         """
         self.plot_gray_scale_widget.clear()
         title = '灰度图' if self.image_colormap == '灰度' else f'彩色图 - {self.image_colormap}'
-        self.plot_gray_scale_widget.setTitle(f'<font face="Microsoft YaHei" size="5">{title}</font>')
+        self.plot_gray_scale_widget.setTitle(plot_html(title, PLOT_TITLE_POINT_SIZE))
         self.tab_widget.setTabText(0, title)
 
         item = pg.ImageItem()
         self.addDataImageItem(self.plot_gray_scale_widget, item, self.data, use_image_controls=True,
                               show_color_bar=True)
+        self.drawVehicleTrajectories()
 
     def addDataImageItem(self,
                          plot_widget: MyPlotWidget,
@@ -864,6 +902,44 @@ class MainWindow(QMainWindow):
         view_box = plot_widget.getViewBox()
         view_box.setLimits(xMin=start_time, xMax=start_time + duration, yMin=0, yMax=channel_count)
         view_box.setRange(xRange=(start_time, start_time + duration), yRange=(0, channel_count), padding=0)
+
+    def drawVehicleTrajectories(self):
+        """Draw stored vehicle paths in the current image's local coordinates."""
+        if self._hide_vehicle_trajectories or not self.vehicle_trajectories:
+            return
+        if not hasattr(self, 'sampling_times_from_num') or not hasattr(self, 'channel_from_num'):
+            return
+
+        start_time = (self.sampling_times_from_num - 1) / self.sampling_rate
+        end_time = self.sampling_times_to_num / self.sampling_rate
+        channel_from = self.channel_from_num
+        channel_to = self.channel_to_num
+        colors = ('#e6194B', '#3cb44b', '#4363d8', '#f58231', '#911eb4', '#42d4f4', '#f032e6', '#bfef45')
+
+        for trajectory in self.vehicle_trajectories:
+            if not getattr(trajectory, 'visible', True):
+                continue
+            channels = np.asarray(trajectory.channels)
+            times = np.asarray(trajectory.times)
+            visible = (
+                (channels >= channel_from)
+                & (channels <= channel_to)
+                & (times >= start_time)
+                & (times <= end_time)
+            )
+            if np.count_nonzero(visible) < 2:
+                continue
+            color = colors[(int(trajectory.identifier) - 1) % len(colors)]
+            local_channels = channels[visible] - channel_from + 0.5
+            self.plot_gray_scale_widget.plot(
+                times[visible],
+                local_channels,
+                pen=pg.mkPen(color=color, width=2),
+                connect='finite',
+            )
+            label = pg.TextItem(str(trajectory.identifier), color=color, anchor=(0, 1))
+            label.setPos(float(times[visible][0]), float(local_channels[0]))
+            self.plot_gray_scale_widget.addItem(label)
 
     def updateImageColorParams(self, *args):
         self.image_colormap = self.image_colormap_combx.currentText()
@@ -1034,6 +1110,7 @@ class MainWindow(QMainWindow):
         self.operation_menu.setEnabled(True)
         self.plot_menu.setEnabled(True)
         self.filter_menu.setEnabled(True)
+        self.analysis_menu.setEnabled(True)
         self.das_filter_action.setEnabled(True)
         self.reset_das_filter_action.setEnabled(self.raw_data is not None)
 
@@ -1277,6 +1354,12 @@ class MainWindow(QMainWindow):
         # can preview, undo, and restore results without rereading the files.
         self.raw_data = np.asarray(self.data, dtype=np.float32).copy()
         self.origin_data = self.raw_data.copy()
+        # Filter settings belong to the loaded data.  A successful file change
+        # must start from the dialog defaults appropriate for its sample rate.
+        self._das_filter_settings = None
+        self._vehicle_tracking_settings = None
+        self.vehicle_trajectories = []
+        self._hide_vehicle_trajectories = False
         self.sampling_rate = sampling_rate
         self.channels_num = channels_num
         self.sampling_times = self.data.shape[1]
@@ -1317,6 +1400,10 @@ class MainWindow(QMainWindow):
             data.to_json(fpath, orient='values')
         elif ftype.find('*.pickle') > 0:
             data.to_pickle(fpath)
+
+    def showDASPyConverterDialog(self):
+        """Open the standalone BIN-to-DASPy export dialog."""
+        DASPyConverterDialog(self).exec_()
 
     def changeReadMode(self):
         """
@@ -1854,8 +1941,52 @@ class MainWindow(QMainWindow):
 
         """
         if self.update_data:
+            self.clearVehicleTrajectories(update=False)
             self.origin_data[self.channel_number - 1] = data
             self.data = self.origin_data
+            self.updateImages()
+
+    def showVehicleTrackingDialog(self):
+        """Open the non-destructive vehicle trajectory picker."""
+        if self.raw_data is None or not hasattr(self, 'origin_data'):
+            printError('请先导入 DAS 数据')
+            return
+        visible_range = (
+            self.channel_from_num,
+            self.channel_to_num,
+            self.sampling_times_from_num,
+            self.sampling_times_to_num,
+        )
+        dialog = VehicleTrackingDialog(
+            self.origin_data,
+            self.sampling_rate,
+            visible_range=visible_range,
+            settings=self._vehicle_tracking_settings,
+            trajectories=self.vehicle_trajectories,
+            parent=self,
+        )
+        self.vehicle_tracking_dialog = dialog
+        dialog.trajectoriesChanged.connect(self.setVehicleTrajectories)
+        dialog.exec_()
+        self._vehicle_tracking_settings = dialog.settings()
+        self.vehicle_tracking_dialog = None
+
+    def setVehicleTrajectories(self, trajectories):
+        """Persist analysis-only trajectories and refresh their image overlay."""
+        self.vehicle_trajectories = list(trajectories)
+        self._hide_vehicle_trajectories = False
+        self.updateImages()
+        count = len(self.vehicle_trajectories)
+        self.statusBar().showMessage(
+            f'车辆轨迹拾取结果已更新：{count} 条。结果仅叠加显示，不会修改数据。',
+            6000,
+        )
+
+    def clearVehicleTrajectories(self, update: bool = True):
+        """Discard paths whose source data have been replaced."""
+        self.vehicle_trajectories = []
+        self._hide_vehicle_trajectories = False
+        if update and hasattr(self, 'origin_data'):
             self.updateImages()
 
     def showDASFilterDialog(self):
@@ -1875,6 +2006,7 @@ class MainWindow(QMainWindow):
             self.origin_data,
             self.sampling_rate,
             visible_range=visible_range,
+            settings=self._das_filter_settings,
             parent=self,
         )
         self.das_filter_dialog = dialog
@@ -1882,11 +2014,13 @@ class MainWindow(QMainWindow):
         dialog.committed.connect(self.commitDASFilterData)
         dialog.rejected.connect(self.cancelDASFilterData)
         dialog.exec_()
+        self._das_filter_settings = dialog.filter_settings()
         self.das_filter_dialog = None
         self._filter_dialog_original = None
 
     def previewDASFilterData(self, data: np.ndarray, description: str = ''):
         """Refresh all plots with a dialog preview without changing the baseline."""
+        self._hide_vehicle_trajectories = True
         self.origin_data = np.asarray(data, dtype=np.float32).copy()
         self.updateDataRange()
         self.updateImages()
@@ -1895,6 +2029,7 @@ class MainWindow(QMainWindow):
 
     def commitDASFilterData(self, data: np.ndarray):
         """Commit the dialog result as the current working data."""
+        self.clearVehicleTrajectories(update=False)
         self.origin_data = np.asarray(data, dtype=np.float32).copy()
         self.updateDataRange()
         self.updateImages()
@@ -1905,6 +2040,7 @@ class MainWindow(QMainWindow):
         """Restore the data that was present before opening the dialog."""
         if self._filter_dialog_original is None:
             return
+        self._hide_vehicle_trajectories = False
         self.origin_data = self._filter_dialog_original.copy()
         self.updateDataRange()
         self.updateImages()
@@ -1914,6 +2050,7 @@ class MainWindow(QMainWindow):
         """Restore the detrended data loaded from disk."""
         if self.raw_data is None:
             return
+        self.clearVehicleTrajectories(update=False)
         self.origin_data = np.asarray(self.raw_data, dtype=np.float32).copy()
         self.updateDataRange()
         self.updateImages()

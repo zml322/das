@@ -11,9 +11,10 @@ import pyqtgraph as pg
 from scipy.spatial.distance import euclidean
 
 from PyQt5.QtCore import QRegExp, Qt
-from PyQt5.QtGui import QRegExpValidator, QFont, QColor
+from PyQt5.QtGui import QRegExpValidator, QColor
 from PyQt5.QtWidgets import QLineEdit, QLabel, QComboBox, QCheckBox, QPushButton, QRadioButton, QSpinBox, QMenu, \
     QAction, QWidget, QTextEdit, QDialog
+from .theme import PLOT_LABEL_POINT_SIZE, PLOT_TICK_POINT_SIZE, PLOT_TITLE_POINT_SIZE, plot_font, plot_html
 
 
 class Menu(QMenu):
@@ -53,13 +54,11 @@ class Dialog(QDialog):
 class Label(QLabel):
     def __init__(self, text: str):
         super().__init__(text)
-        self.setStyleSheet('font-size: 17px; font-family: "Times New Roman", "Microsoft YaHei";')
 
 
 class PushButton(QPushButton):
     def __init__(self, text: str = None):
         super().__init__(text)
-        self.setStyleSheet('font-size: 17px; font-family: "Times New Roman", "Microsoft YaHei";')
 
 
 class LineEdit(QLineEdit):
@@ -67,7 +66,6 @@ class LineEdit(QLineEdit):
         super().__init__()
         if not focus:
             self.setFocusPolicy(Qt.NoFocus)
-        self.setStyleSheet('font-size: 17px; font-family: "Times New Roman", "Microsoft YaHei";')
 
 
 class LineEditWithReg(LineEdit):
@@ -100,31 +98,26 @@ class TextEdit(QTextEdit):
     def __init__(self):
         super().__init__()
         self.setReadOnly(True)
-        self.setStyleSheet('font-size: 17px; font-family: "Times New Roman", "Microsoft YaHei";')
 
 
 class ComboBox(QComboBox):
     def __init__(self):
         super().__init__()
-        self.setStyleSheet('font-size: 16px; font-family: "Times New Roman", "Microsoft YaHei";')
 
 
 class RadioButton(QRadioButton):
     def __init__(self, text: str):
         super().__init__(text)
-        self.setStyleSheet('font-size: 17px; font-family: "Times New Roman", "Microsoft YaHei";')
 
 
 class CheckBox(QCheckBox):
     def __init__(self, text: str):
         super().__init__(text)
-        self.setStyleSheet('font-size: 17px; font-family: "Times New Roman", "Microsoft YaHei";')
 
 
 class SpinBox(QSpinBox):
     def __init__(self):
         super().__init__()
-        self.setStyleSheet('font-size: 17px; font-family: "Times New Roman", "Microsoft YaHei";')
 
 
 # class FigureCanvas(FigureCanvasQTAgg):
@@ -202,11 +195,11 @@ class MyPlotWidget(pg.PlotWidget):
     def __init__(self, title: str, xlabel: str, ylabel: str, grid: bool = False, check_mouse: bool = True):
         super().__init__()
         self.check_mouse = check_mouse
-        self.setTitle(f'<font face="Microsoft YaHei" size="5">{title}</font>')
-        self.setLabel('bottom', f'<font face="Microsoft YaHei" size="3">{xlabel}</font>')
-        self.setLabel('left', f'<font face="Microsoft YaHei" size="3">{ylabel}</font>')
-        self.getAxis('bottom').setTickFont(QFont('Times New Roman'))
-        self.getAxis('left').setTickFont(QFont('Times New Roman'))
+        self.setTitle(plot_html(title, PLOT_TITLE_POINT_SIZE))
+        self.setLabel('bottom', plot_html(xlabel, PLOT_LABEL_POINT_SIZE))
+        self.setLabel('left', plot_html(ylabel, PLOT_LABEL_POINT_SIZE))
+        self.getAxis('bottom').setTickFont(plot_font(PLOT_TICK_POINT_SIZE))
+        self.getAxis('left').setTickFont(plot_font(PLOT_TICK_POINT_SIZE))
         self.getAxis('left').setWidth(50)
         if check_mouse:
             self.initPlotItem(title, xlabel, ylabel, grid)
@@ -215,11 +208,11 @@ class MyPlotWidget(pg.PlotWidget):
     def initPlotItem(self, title: str, xlabel: str, ylabel: str, grid: bool) -> None:
         """初始化一个plotitem"""
         self.plot_item = pg.PlotItem()
-        self.plot_item.setTitle(f'<font face="Microsoft YaHei" size="5">{title}</font>')
-        self.plot_item.setLabel('bottom', f'<font face="Microsoft YaHei" size="3">{xlabel}</font>')
-        self.plot_item.setLabel('left', f'<font face="Microsoft YaHei" size="3">{ylabel}</font>')
-        self.plot_item.getAxis('bottom').setTickFont(QFont('Times New Roman'))
-        self.plot_item.getAxis('left').setTickFont(QFont('Times New Roman'))
+        self.plot_item.setTitle(plot_html(title, PLOT_TITLE_POINT_SIZE))
+        self.plot_item.setLabel('bottom', plot_html(xlabel, PLOT_LABEL_POINT_SIZE))
+        self.plot_item.setLabel('left', plot_html(ylabel, PLOT_LABEL_POINT_SIZE))
+        self.plot_item.getAxis('bottom').setTickFont(plot_font(PLOT_TICK_POINT_SIZE))
+        self.plot_item.getAxis('left').setTickFont(plot_font(PLOT_TICK_POINT_SIZE))
         self.plot_item.getAxis('left').setWidth(50)
         if grid:
             self.plot_item.showGrid(x=True, y=True, alpha=0.2)
@@ -255,7 +248,7 @@ class MyPlotWidget(pg.PlotWidget):
         # 数据标签
         self.text_item = pg.TextItem(color=QColor('black'), border=pg.mkPen(QColor('black')),
                                      fill=pg.mkBrush(QColor('yellow')))
-        self.text_item.setFont(QFont('Times New Roman', 10))
+        self.text_item.setFont(plot_font(PLOT_TICK_POINT_SIZE))
         self.plot_item.addItem(self.text_item)
 
         # 十字线
