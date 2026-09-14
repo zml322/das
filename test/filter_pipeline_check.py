@@ -103,8 +103,10 @@ class FilterPipelineChecks(unittest.TestCase):
             1000,
             visible_range=(1, 4, 1, 12),
             segment_ranges=[(0, 6), (6, 12)],
+            auto_reapply=False,
         )
         self.assertFalse(dialog.isModal())
+        self.assertFalse(dialog.auto_reapply_checkbox.isChecked())
         step = FilterStep("mad_normalize", {}, (2, 3, 2, 10), "各通道 MAD 归一化")
         dialog._start_replay([step], "test", 0)
         wait_for_dialog(dialog)
@@ -180,11 +182,19 @@ class FilterPipelineChecks(unittest.TestCase):
             4,
             1000,
         )
+        window._source_time_headers = [
+            [2026, 8, 26, 16, 54, 19],
+            [2026, 8, 26, 16, 54, 20],
+        ]
+        window.time_correction_seconds = 12.0
+        window.rebuildDataTimeline()
         window.initLocalParams()
         window.updateDataRange()
         window.updateDataParams()
+        window.updateDataGPSTime()
         window.updateStitchedFilesList()
         window.plotGrayScaleImage()
+        window.plotSingleChannelTime()
         window.plotMultiWavesImage()
 
         self.assertEqual(window.stitched_files_list.count(), 2)
@@ -209,18 +219,100 @@ class FilterPipelineChecks(unittest.TestCase):
         self.assertEqual(visuals[0]["bar"].brush().color().alpha(), 60)
         self.assertEqual(visuals[1]["bar"].brush().color().alpha(), 112)
         self.assertEqual(multi_visuals[1]["bar"].brush().color().alpha(), 112)
+
+        baseline = window.origin_data.copy()
+        window.setEventSampleRange(25, 175)
+        self.assertEqual(window.event_range_from_edit.text(), "2026-08-26 16:54:30.925")
+        self.assertEqual(window.event_range_to_edit.text(), "2026-08-26 16:54:31.075")
+        for plot_widget in (
+            window.plot_gray_scale_widget,
+            window.plot_single_channel_time_widget,
+            window.plot_multi_waves_widget,
+        ):
+            self.assertEqual(
+                tuple(plot_widget._event_range_visual["region"].getRegion()),
+                (0.025, 0.175),
+            )
+        window.viewEventRange()
+        self.assertEqual((window.sampling_times_from_num, window.sampling_times_to_num), (26, 175))
+        np.testing.assert_array_equal(window.origin_data, baseline)
+        window.restoreFullEventRange()
+        self.assertEqual((window.sampling_times_from_num, window.sampling_times_to_num), (1, 200))
+        window.deleteLater()
+
+    def test_auto_reapply_adapts_full_range_and_replays_from_new_baseline(self):
+        window = MainWindow()
+        new_raw = np.arange(1500, dtype=np.float32).reshape(5, 300)
+        window.raw_data = new_raw.copy()
+        window.raw_data.setflags(write=False)
+        window.origin_data = new_raw.copy()
+        window.sampling_rate = 1000.0
+        window.channels_num = 5
+        window.sampling_times = 300
+        window.data_group = DataGroup.from_files(["next.bin"], [300], 5, 1000)
+        window._last_das_filter_shape = (4, 200)
+        window._last_das_filter_steps = [
+            FilterStep("mad_normalize", {}, (1, 4, 1, 200), "MAD")
+        ]
+        window._das_filter_steps = []
+        window.auto_reapply_filter_pipeline = True
+        window.initLocalParams()
+        window.updateDataRange()
+        window.updateDataParams()
+
+        adapted = window.adaptPreviousFilterSteps()
+        self.assertEqual(adapted[0].selection, (1, 5, 1, 300))
+        window.showDASFilterDialog()
+        window.syncDASFilterDialog()
+        wait_for_dialog(window.das_filter_dialog)
+        self.assertEqual(window._das_filter_steps[0].selection, (1, 5, 1, 300))
+        self.assertFalse(np.array_equal(window.origin_data, new_raw))
+
+        window._last_das_filter_steps = [
+            FilterStep("mad_normalize", {}, (1, 4, 50, 350), "局部 MAD")
+        ]
+        window._last_das_filter_shape = (4, 400)
+        with self.assertRaisesRegex(ValueError, "超出新数据"):
+            window.adaptPreviousFilterSteps()
+        window.das_filter_dialog.hide()
         window.deleteLater()
 
     def test_real_bin_stitch_metadata_and_parameter_persistence(self):
         files = sorted((PROJECT_ROOT / "test").glob("*.bin"), key=lambda p: natural_sort_key(p.name))
         self.assertGreaterEqual(len(files), 2)
         window = MainWindow()
+        window.time_correction_seconds = 12.0
         window.file_names = [str(path) for path in files[:2]]
         window.file_path = str(files[0].parent)
         window.readData()
         self.assertEqual(window.raw_data.shape, (520, 61440))
         self.assertEqual(window.data_group.boundaries, [30720])
         self.assertEqual([segment.sample_count for segment in window.data_group.segments], [30720, 30720])
+        self.assertEqual(
+            window.data_timeline.start_time.isoformat(timespec="milliseconds"),
+            "2026-08-26T16:54:00.280",
+        )
+        self.assertEqual(
+            window.data_timeline.end_time.isoformat(timespec="milliseconds"),
+            "2026-08-26T16:55:01.720",
+        )
+        self.assertAlmostEqual(
+            window.data_timeline.segments[1].end_time_difference_seconds,
+            0.28,
+            places=6,
+        )
+        window.plot_gray_scale_widget.setTimeOrigin(window.data_timeline.start_time)
+        self.assertEqual(
+            window.plot_gray_scale_widget.time_axis.tickStrings([0, 30.72], 1, 10),
+            ["16:54:00.280", "16:54:31.000"],
+        )
+        window.updateFile()
+        highlighted = {
+            window.files_table_widget.item(row, 0).text()
+            for row in range(window.files_table_widget.rowCount())
+            if window.files_table_widget.item(row, 0).isSelected()
+        }
+        self.assertEqual(highlighted, {path.name for path in files[:2]})
 
         previous = FilterStep("mad_normalize", {}, (1, 2, 1, 100), "MAD")
         window._das_filter_settings = {"algorithm": "mad_normalize"}

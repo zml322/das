@@ -377,6 +377,7 @@ class DASFilterDialog(QDialog):
     committed = pyqtSignal(object)
     pipelineChanged = pyqtSignal(object)
     settingsChanged = pyqtSignal(object)
+    autoReapplyChanged = pyqtSignal(bool)
 
     def __init__(
         self,
@@ -388,6 +389,7 @@ class DASFilterDialog(QDialog):
         current_data: Optional[np.ndarray] = None,
         segment_ranges: Optional[Sequence[Tuple[int, int]]] = None,
         previous_steps: Optional[Iterable[FilterStep]] = None,
+        auto_reapply: bool = True,
         parent: Optional[QWidget] = None,
     ):
         super().__init__(parent)
@@ -416,6 +418,7 @@ class DASFilterDialog(QDialog):
         self.pipeline = FilterPipeline(steps)
         self.committed_steps = self.pipeline.steps()
         self.previous_steps = clone_steps(previous_steps or [])
+        self.auto_reapply = bool(auto_reapply)
         self._worker: Optional[_PipelineWorker] = None
         self._pending_steps: List[FilterStep] = []
         self._pending_description = ""
@@ -651,6 +654,13 @@ class DASFilterDialog(QDialog):
         ):
             history_button_row.addWidget(button)
         history_layout.addLayout(history_button_row)
+        self.auto_reapply_checkbox = QCheckBox("切换文件后自动应用当前滤波链")
+        self.auto_reapply_checkbox.setChecked(self.auto_reapply)
+        self.auto_reapply_checkbox.setToolTip(
+            "自动从新文件的导入基线重新回放相同步骤；不兼容时保持原始数据并提示"
+        )
+        self.auto_reapply_checkbox.toggled.connect(self._auto_reapply_toggled)
+        history_layout.addWidget(self.auto_reapply_checkbox)
         root.addWidget(history_group, 1)
 
         self.status_label = QLabel("设置参数后点击“添加并预览”，滤波链会从导入基线重新计算。")
@@ -1165,8 +1175,37 @@ class DASFilterDialog(QDialog):
         if not self.previous_steps:
             QMessageBox.information(self, "没有历史滤波链", "上一组数据没有可复用的滤波步骤。")
             return
-        steps = clone_steps(self.previous_steps, new_identifiers=True)
-        self._start_replay(steps, "应用上一组数据的滤波链", len(steps) - 1)
+        self.replayExternalPipeline(
+            self.previous_steps,
+            "应用上一组数据的滤波链",
+            commit_after=False,
+        )
+
+    def replayExternalPipeline(
+        self,
+        steps: Iterable[FilterStep],
+        description: str,
+        commit_after: bool = False,
+    ) -> bool:
+        """Replay a caller-supplied compatible chain on the current immutable baseline."""
+
+        if self.is_busy():
+            return False
+        candidate = clone_steps(steps, new_identifiers=True)
+        if not candidate:
+            return False
+        self._start_replay(candidate, description, len(candidate) - 1, commit_after=commit_after)
+        return True
+
+    def _auto_reapply_toggled(self, enabled: bool) -> None:
+        self.auto_reapply = bool(enabled)
+        self.autoReapplyChanged.emit(self.auto_reapply)
+
+    def setAutoReapply(self, enabled: bool) -> None:
+        self.auto_reapply = bool(enabled)
+        self.auto_reapply_checkbox.blockSignals(True)
+        self.auto_reapply_checkbox.setChecked(self.auto_reapply)
+        self.auto_reapply_checkbox.blockSignals(False)
 
     def _start_replay(
         self,

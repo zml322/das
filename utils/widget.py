@@ -4,6 +4,7 @@
 @Author  : zxy
 @File    : widget.py
 """
+from datetime import datetime, timedelta
 from typing import Callable, Union, Tuple
 
 import numpy as np
@@ -15,6 +16,47 @@ from PyQt5.QtGui import QRegExpValidator, QColor
 from PyQt5.QtWidgets import QLineEdit, QLabel, QComboBox, QCheckBox, QPushButton, QRadioButton, QSpinBox, QMenu, \
     QAction, QWidget, QTextEdit, QDialog
 from .theme import PLOT_LABEL_POINT_SIZE, PLOT_TICK_POINT_SIZE, PLOT_TITLE_POINT_SIZE, plot_font, plot_html
+
+
+class AbsoluteTimeAxisItem(pg.AxisItem):
+    """Format relative-second plot coordinates as corrected local wall time."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._origin = None
+
+    def setOrigin(self, origin: datetime | None) -> None:
+        self._origin = origin
+        self.update()
+
+    def tickStrings(self, values, scale, spacing):
+        if self._origin is None:
+            return super().tickStrings(values, scale, spacing)
+        try:
+            span = abs(float(self.range[1]) - float(self.range[0]))
+        except (AttributeError, IndexError, TypeError, ValueError):
+            span = 0.0
+        try:
+            range_end = self._origin + timedelta(seconds=max(map(float, self.range)))
+            crosses_date = range_end.date() != self._origin.date()
+        except (AttributeError, TypeError, ValueError, OverflowError):
+            crosses_date = False
+        show_date = span >= 12 * 3600 or crosses_date
+        show_milliseconds = span < 3600 and (
+            abs(float(spacing)) < 1.0 or self._origin.microsecond != 0
+        )
+        result = []
+        for value in values:
+            moment = self._origin + timedelta(seconds=float(value))
+            if show_date and show_milliseconds:
+                result.append(moment.strftime("%m-%d %H:%M:%S.%f")[:-3])
+            elif show_date:
+                result.append(moment.strftime("%m-%d %H:%M:%S"))
+            elif show_milliseconds:
+                result.append(moment.strftime("%H:%M:%S.%f")[:-3])
+            else:
+                result.append(moment.strftime("%H:%M:%S"))
+        return result
 
 
 class Menu(QMenu):
@@ -192,8 +234,11 @@ class SpinBox(QSpinBox):
 class MyPlotWidget(pg.PlotWidget):
     """带字体、可显示数据"""
 
-    def __init__(self, title: str, xlabel: str, ylabel: str, grid: bool = False, check_mouse: bool = True):
-        super().__init__()
+    def __init__(self, title: str, xlabel: str, ylabel: str, grid: bool = False, check_mouse: bool = True,
+                 time_axis: bool = False):
+        self.time_axis = AbsoluteTimeAxisItem(orientation='bottom') if time_axis else None
+        plot_item = pg.PlotItem(axisItems={'bottom': self.time_axis}) if self.time_axis is not None else None
+        super().__init__(plotItem=plot_item)
         self.check_mouse = check_mouse
         self.setTitle(plot_html(title, PLOT_TITLE_POINT_SIZE))
         self.setLabel('bottom', plot_html(xlabel, PLOT_LABEL_POINT_SIZE))
@@ -207,7 +252,7 @@ class MyPlotWidget(pg.PlotWidget):
 
     def initPlotItem(self, title: str, xlabel: str, ylabel: str, grid: bool) -> None:
         """初始化一个plotitem"""
-        self.plot_item = pg.PlotItem()
+        self.plot_item = self.getPlotItem()
         self.plot_item.setTitle(plot_html(title, PLOT_TITLE_POINT_SIZE))
         self.plot_item.setLabel('bottom', plot_html(xlabel, PLOT_LABEL_POINT_SIZE))
         self.plot_item.setLabel('left', plot_html(ylabel, PLOT_LABEL_POINT_SIZE))
@@ -216,7 +261,10 @@ class MyPlotWidget(pg.PlotWidget):
         self.plot_item.getAxis('left').setWidth(50)
         if grid:
             self.plot_item.showGrid(x=True, y=True, alpha=0.2)
-        self.setCentralItem(self.plot_item)
+
+    def setTimeOrigin(self, origin: datetime | None) -> None:
+        if self.time_axis is not None:
+            self.time_axis.setOrigin(origin)
 
     def updateAxesRange(self):
         """更新xy轴范围"""

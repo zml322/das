@@ -95,7 +95,7 @@ def apply_application_theme(application) -> None:
             min-height: 22px;
             padding: 5px 11px;
         }}
-        QPushButton, QComboBox, QSpinBox, QDoubleSpinBox, QLineEdit {{
+        QPushButton, QComboBox, QSpinBox, QDoubleSpinBox, QDateTimeEdit, QLineEdit {{
             min-height: 24px;
             padding: 2px 5px;
         }}

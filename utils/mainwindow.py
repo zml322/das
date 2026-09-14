@@ -11,17 +11,18 @@ import sys
 
 import pandas as pd
 from PyQt5 import QtMultimedia
-from PyQt5.QtCore import Qt, QUrl, QEvent, QRectF, QTimer
+from PyQt5.QtCore import Qt, QUrl, QEvent, QRectF, QTimer, QDateTime
 from PyQt5.QtGui import QBrush, QColor, QPen
 from PyQt5.QtWidgets import QApplication, QMainWindow, QFileDialog, qApp, QTabWidget, QTableWidget, QAbstractItemView, \
     QTableWidgetItem, QHeaderView, QTabBar, QScrollBar, QHBoxLayout, QDoubleSpinBox, QSplitter, QVBoxLayout, QWidget, \
-    QFormLayout, QGroupBox, QListWidget, QListWidgetItem, QGraphicsRectItem
+    QFormLayout, QGroupBox, QListWidget, QListWidgetItem, QGraphicsRectItem, QDateTimeEdit
 from matplotlib import pyplot as plt
 from scipy.integrate import cumulative_trapezoid
 
 from image.image import *
 from .classes.binary_image import BinaryImageHandler
 from .classes.data_group import DataGroup, ensure_memory_budget, natural_sort_key
+from .classes.data_timeline import DataTimeline, format_wall_time
 from .classes.data_sifting import DataSifting
 from .classes.das_filter import DASFilterDialog
 from .classes.filter_pipeline import FilterStep, clone_steps
@@ -36,6 +37,7 @@ from .classes.wavelet import DWTHandler, CWTHandler
 from .classes.wavelet_packet import DWPTHandler
 from .bin_reader import bin2numpy, read_bin_header
 from .function import *
+from .preferences import AppPreferences
 from .theme import PLOT_LABEL_POINT_SIZE, PLOT_TICK_POINT_SIZE, PLOT_TITLE_POINT_SIZE, plot_font, plot_html, ui_font_family
 from .widget import *
 from .version import __version__
@@ -143,10 +145,18 @@ class MainWindow(QMainWindow):
         self._das_filter_settings = None
         self._das_filter_steps = []
         self._last_das_filter_steps = []
+        self._last_das_filter_shape = None
         self.data_group = None
+        self.data_timeline = None
+        self._source_time_headers = []
         self.selected_file_segment_index = None
         self._refreshing_stitched_files = False
         self._file_segment_plot_widgets = []
+        self._event_range_plot_widgets = []
+        self._syncing_event_range = False
+        self.preferences = AppPreferences()
+        self.time_correction_seconds = self.preferences.time_correction_seconds()
+        self.auto_reapply_filter_pipeline = self.preferences.auto_reapply_filter()
         self._vehicle_tracking_settings = None
         self.vehicle_trajectories = []
         self._hide_vehicle_trajectories = False
@@ -256,9 +266,16 @@ class MainWindow(QMainWindow):
 
         # 操作-裁剪数据（时间）
         self.set_time_range_action = Action(self.operation_menu,
-                                            '查看范围（时间）',
-                                            '按时间设置数据查看范围',
+                                            '查看范围（相对秒）',
+                                            '按相对秒设置数据查看范围',
                                             self.setTimeRangeDialog)
+
+        self.time_correction_action = Action(
+            self.operation_menu,
+            '时间校正设置',
+            '设置设备落后真实时间的秒数，并保存到下次启动',
+            self.showTimeCorrectionDialog,
+        )
 
         # 操作-裁剪数据（通道号）
         self.set_channel_range_action = Action(self.operation_menu,
@@ -506,6 +523,7 @@ class MainWindow(QMainWindow):
         self.files_table_widget.setToolTip('鼠标悬停在文件名上可查看完整路径')
         QTableWidget.resizeRowsToContents(self.files_table_widget)
         self.files_table_widget.setSelectionBehavior(QAbstractItemView.SelectRows)  # 设置一次选中一排内容
+        self.files_table_widget.setSelectionMode(QAbstractItemView.MultiSelection)
         self.files_table_widget.itemClicked.connect(self.selectDataFromTable)
 
         # 文件区布局
@@ -535,12 +553,14 @@ class MainWindow(QMainWindow):
         self.current_channels_line_edit = LineEditWithReg(focus=False)
         self.gps_from_line_edit = LineEdit(focus=False)
         self.gps_to_line_edit = LineEdit(focus=False)
+        self.time_correction_line_edit = LineEdit(focus=False)
         for field in (
                 self.sampling_rate_line_edit,
                 self.current_sampling_times_line_edit,
                 self.current_channels_line_edit,
                 self.gps_from_line_edit,
                 self.gps_to_line_edit,
+                self.time_correction_line_edit,
         ):
             field.setReadOnly(True)
 
@@ -552,8 +572,9 @@ class MainWindow(QMainWindow):
         overview_form.addRow('采样率', self.sampling_rate_line_edit)
         overview_form.addRow('采样次数', self.current_sampling_times_line_edit)
         overview_form.addRow('通道数', self.current_channels_line_edit)
-        overview_form.addRow('起始 GPS', self.gps_from_line_edit)
-        overview_form.addRow('结束 GPS', self.gps_to_line_edit)
+        overview_form.addRow('推算开始时间', self.gps_from_line_edit)
+        overview_form.addRow('推算结束时间', self.gps_to_line_edit)
+        overview_form.addRow('设备时间修正', self.time_correction_line_edit)
         overview_group.setLayout(overview_form)
         file_area_vbox.addWidget(overview_group)
 
@@ -632,7 +653,9 @@ class MainWindow(QMainWindow):
         image_controls_hbox.addStretch(1)
 
         # 绘制灰度图
-        self.plot_gray_scale_widget = MyPlotWidget('灰度图', '时间（s）', '通道', check_mouse=False)
+        self.plot_gray_scale_widget = MyPlotWidget(
+            '灰度图', '推算时间', '通道', check_mouse=False, time_axis=True
+        )
         gray_scale_container = QWidget()
         gray_scale_vbox = QVBoxLayout()
         gray_scale_vbox.setContentsMargins(6, 6, 6, 6)
@@ -642,7 +665,9 @@ class MainWindow(QMainWindow):
         gray_scale_container.setLayout(gray_scale_vbox)
 
         # 绘制单通道相位差-时间图
-        self.plot_single_channel_time_widget = MyPlotWidget('相位差图', '时间（s）', '相位差（rad）', grid=True)
+        self.plot_single_channel_time_widget = MyPlotWidget(
+            '相位差图', '推算时间', '相位差（rad）', grid=True, time_axis=True
+        )
 
         # 绘制频谱图
         self.plot_amplitude_frequency_widget = MyPlotWidget('幅值图', '频率（Hz）', '幅值', grid=True)
@@ -668,10 +693,42 @@ class MainWindow(QMainWindow):
         self.tab_widget.tabBar().setTabButton(1, QTabBar.RightSide, None)  # 设置删除按钮消失
         self.tab_widget.tabBar().setTabButton(2, QTabBar.RightSide, None)
 
+        self.event_range_widget = QWidget()
+        event_range_hbox = QHBoxLayout()
+        event_range_hbox.setContentsMargins(6, 4, 6, 4)
+        event_range_hbox.setSpacing(6)
+        self.event_range_from_edit = QDateTimeEdit()
+        self.event_range_to_edit = QDateTimeEdit()
+        for editor in (self.event_range_from_edit, self.event_range_to_edit):
+            editor.setDisplayFormat('yyyy-MM-dd HH:mm:ss.zzz')
+            editor.setCalendarPopup(True)
+            editor.setKeyboardTracking(False)
+            editor.setMinimumWidth(190)
+        self.event_range_set_button = PushButton('设置标记')
+        self.event_range_view_button = PushButton('查看此范围')
+        self.event_range_reset_button = PushButton('恢复全部')
+        self.event_range_set_button.setToolTip('移动图中的开始/结束竖线，不改变数据查看范围')
+        self.event_range_view_button.setToolTip('按竖线范围更新当前视图，不修改导入原始数据')
+        self.event_range_reset_button.setToolTip('恢复完整时间视图并把竖线重置到数据两端')
+        self.event_range_set_button.clicked.connect(self.setEventRangeFromInputs)
+        self.event_range_view_button.clicked.connect(self.viewEventRange)
+        self.event_range_reset_button.clicked.connect(self.restoreFullEventRange)
+        event_range_hbox.addWidget(Label('事件开始'))
+        event_range_hbox.addWidget(self.event_range_from_edit)
+        event_range_hbox.addWidget(Label('事件结束'))
+        event_range_hbox.addWidget(self.event_range_to_edit)
+        event_range_hbox.addWidget(self.event_range_set_button)
+        event_range_hbox.addWidget(self.event_range_view_button)
+        event_range_hbox.addWidget(self.event_range_reset_button)
+        event_range_hbox.addStretch(1)
+        self.event_range_widget.setLayout(event_range_hbox)
+        self.setEventRangeControlsEnabled(False)
+
         # Tab 是唯一的主工作区，最大化图形可用面积。
         main_window_vbox = QVBoxLayout()
         main_window_vbox.setContentsMargins(0, 0, 0, 0)
         main_window_vbox.setSpacing(0)
+        main_window_vbox.addWidget(self.event_range_widget)
         main_window_vbox.addWidget(self.tab_widget)
 
         file_area_widget = QWidget()
@@ -698,9 +755,13 @@ class MainWindow(QMainWindow):
     def initMultiWavesTab(self):
         """创建固定的多通道云图页；数据变化时只重绘，不重复创建 Tab。"""
         self.multi_waves_view_box = pg.ViewBox(enableMenu=False)
-        self.plot_multi_waves_widget = pg.PlotWidget(viewBox=self.multi_waves_view_box)
+        self.multi_waves_time_axis = AbsoluteTimeAxisItem(orientation='bottom')
+        self.plot_multi_waves_widget = pg.PlotWidget(
+            viewBox=self.multi_waves_view_box,
+            axisItems={'bottom': self.multi_waves_time_axis},
+        )
         self.plot_multi_waves_widget.setTitle(plot_html('多通道云图', PLOT_TITLE_POINT_SIZE))
-        self.plot_multi_waves_widget.setLabel('bottom', plot_html('时间（s）', PLOT_LABEL_POINT_SIZE))
+        self.plot_multi_waves_widget.setLabel('bottom', plot_html('推算时间', PLOT_LABEL_POINT_SIZE))
         self.plot_multi_waves_widget.setLabel('left', plot_html('通道', PLOT_LABEL_POINT_SIZE))
         self.plot_multi_waves_widget.getAxis('bottom').setTickFont(plot_font(PLOT_TICK_POINT_SIZE))
         self.plot_multi_waves_widget.getAxis('left').setTickFont(plot_font(PLOT_TICK_POINT_SIZE))
@@ -752,7 +813,7 @@ class MainWindow(QMainWindow):
         selection_controls_hbox.addWidget(self.multi_waves_channel_to_spin_box)
         selection_controls_hbox.addWidget(self.multi_waves_confirm_button)
         selection_controls_hbox.addSpacing(12)
-        selection_controls_hbox.addWidget(Label('显示时间'))
+        selection_controls_hbox.addWidget(Label('显示时间（相对秒）'))
         selection_controls_hbox.addWidget(self.multi_waves_time_from_spin_box)
         selection_controls_hbox.addWidget(Label('至'))
         selection_controls_hbox.addWidget(self.multi_waves_time_to_spin_box)
@@ -802,6 +863,8 @@ class MainWindow(QMainWindow):
         self.channel_to_num = self.channels_num
         self.sampling_times_from_num = 1
         self.sampling_times_to_num = self.sampling_times
+        self.event_range_start_sample = 0
+        self.event_range_end_sample = self.sampling_times
         self.multi_waves_reset_pending = True
 
     # """------------------------------------------------------------------------------------------------------------"""
@@ -911,6 +974,9 @@ class MainWindow(QMainWindow):
 
         """
         self.plot_gray_scale_widget.clear()
+        self.plot_gray_scale_widget.setTimeOrigin(
+            self.data_timeline.start_time if self.data_timeline is not None else None
+        )
         title = '灰度图' if self.image_colormap == '灰度' else f'彩色图 - {self.image_colormap}'
         self.plot_gray_scale_widget.setTitle(plot_html(title, PLOT_TITLE_POINT_SIZE))
         self.tab_widget.setTabText(0, title)
@@ -920,6 +986,7 @@ class MainWindow(QMainWindow):
                               show_color_bar=True)
         self.drawFileBoundaries(self.plot_gray_scale_widget, 0, self.current_channels)
         self.drawVehicleTrajectories()
+        self.drawEventRange(self.plot_gray_scale_widget)
 
     def drawFileBoundaries(self, plot_widget, y_min: float, y_max: float):
         """Draw one clickable source strip per file plus dashed seam lines."""
@@ -1022,7 +1089,7 @@ class MainWindow(QMainWindow):
         return sequence
 
     def fileSegmentDetails(self, index: int) -> str:
-        """Build the full path, sample range, relative time and duration text."""
+        """Build the path, sample range and corrected time details."""
 
         if self.data_group is None or not (0 <= index < len(self.data_group.segments)):
             return ''
@@ -1031,7 +1098,7 @@ class MainWindow(QMainWindow):
         start_time = segment.start_sample / sampling_rate
         end_time = segment.end_sample / sampling_rate
         duration = segment.sample_count / sampling_rate
-        return (
+        lines = [
             f'第 {index + 1}/{len(self.data_group.segments)} 段\n'
             f'文件：{segment.name}\n'
             f'完整路径：{segment.path}\n'
@@ -1040,7 +1107,22 @@ class MainWindow(QMainWindow):
             f'起止相对时间：{self._formatRelativeSeconds(start_time)} - '
             f'{self._formatRelativeSeconds(end_time)} s\n'
             f'时长：{self._formatRelativeSeconds(duration)} s'
-        )
+        ]
+        if self.data_timeline is not None and index < len(self.data_timeline.segments):
+            timeline_segment = self.data_timeline.segments[index]
+            source_name = '文件名' if timeline_segment.timestamp_source == 'filename' else '文件头'
+            lines.append(
+                f'\n记录结束时间（{source_name}）：{format_wall_time(timeline_segment.recorded_end)}'
+                f'\n修正后记录结束：{format_wall_time(timeline_segment.corrected_recorded_end)}'
+                f'\n连续推算范围：{format_wall_time(timeline_segment.inferred_start)} - '
+                f'{format_wall_time(timeline_segment.inferred_end)}'
+            )
+            if index > 0:
+                lines.append(
+                    f'\n记录与连续推算偏差：'
+                    f'{timeline_segment.end_time_difference_seconds:+.3f} s'
+                )
+        return ''.join(lines)
 
     def updateStitchedFilesList(self):
         """Refresh the left-side source list in exact stitching order."""
@@ -1054,7 +1136,12 @@ class MainWindow(QMainWindow):
             self.stitched_files_group.setTitle(f'当前拼接文件（{len(segments)}）')
             digits = max(2, len(str(len(segments))))
             for index, segment in enumerate(segments):
-                item = QListWidgetItem(f'{index + 1:0{digits}d}  {segment.name}')
+                warning = False
+                if self.data_timeline is not None and index < len(self.data_timeline.segments) and index > 0:
+                    difference = self.data_timeline.segments[index].end_time_difference_seconds
+                    warning = abs(difference) > self.data_timeline.continuity_tolerance_seconds
+                prefix = '⚠ ' if warning else ''
+                item = QListWidgetItem(f'{prefix}{index + 1:0{digits}d}  {segment.name}')
                 item.setData(Qt.UserRole, index)
                 item.setToolTip(self.fileSegmentDetails(index))
                 self.stitched_files_list.addItem(item)
@@ -1141,6 +1228,192 @@ class MainWindow(QMainWindow):
             except RuntimeError:
                 continue
         self._file_segment_plot_widgets = live_widgets
+
+    def setEventRangeControlsEnabled(self, enabled: bool):
+        for widget in (
+            self.event_range_from_edit,
+            self.event_range_to_edit,
+            self.event_range_set_button,
+            self.event_range_view_button,
+            self.event_range_reset_button,
+        ):
+            widget.setEnabled(bool(enabled))
+
+    def updateEventRangeEditors(self):
+        """Synchronize corrected wall times into the event-range controls."""
+
+        if self.data_timeline is None or not hasattr(self, 'event_range_start_sample'):
+            self.setEventRangeControlsEnabled(False)
+            return
+        self.setEventRangeControlsEnabled(True)
+        minimum = QDateTime(self.data_timeline.start_time)
+        maximum = QDateTime(self.data_timeline.end_time)
+        self._syncing_event_range = True
+        try:
+            for editor in (self.event_range_from_edit, self.event_range_to_edit):
+                editor.setDateTimeRange(minimum, maximum)
+            self.event_range_from_edit.setDateTime(QDateTime(
+                self.data_timeline.absolute_time_for_sample(self.event_range_start_sample)
+            ))
+            self.event_range_to_edit.setDateTime(QDateTime(
+                self.data_timeline.absolute_time_for_sample(self.event_range_end_sample)
+            ))
+        finally:
+            self._syncing_event_range = False
+
+    def setEventRangeFromInputs(self):
+        """Move the event markers from corrected absolute-time inputs."""
+
+        if self.data_timeline is None:
+            return
+        start = self.data_timeline.sample_boundary_for_time(
+            self.event_range_from_edit.dateTime().toPyDateTime()
+        )
+        end = self.data_timeline.sample_boundary_for_time(
+            self.event_range_to_edit.dateTime().toPyDateTime()
+        )
+        self.setEventSampleRange(start, end, show_status=True)
+
+    def setEventSampleRange(self, start: int, end: int, show_status: bool = False):
+        """Set a clamped non-empty event interval in zero-based sample boundaries."""
+
+        if not hasattr(self, 'sampling_times') or self.sampling_times <= 0:
+            return
+        start = min(max(int(start), 0), self.sampling_times)
+        end = min(max(int(end), 0), self.sampling_times)
+        if start > end:
+            start, end = end, start
+        if start == end:
+            if end < self.sampling_times:
+                end += 1
+            else:
+                start = max(0, start - 1)
+        self.event_range_start_sample = start
+        self.event_range_end_sample = end
+        self.updateEventRangeEditors()
+        self._syncEventRangePlots()
+        if show_status and self.data_timeline is not None:
+            start_text = format_wall_time(self.data_timeline.absolute_time_for_sample(start))
+            end_text = format_wall_time(self.data_timeline.absolute_time_for_sample(end))
+            self.statusBar().showMessage(
+                f'事件范围：{start_text} - {end_text}  |  '
+                f'采样边界：{start} - {end}  |  时长 {(end - start) / self.sampling_rate:.3f} s',
+                8000,
+            )
+
+    def _eventRangeMoved(self, region):
+        if self._syncing_event_range:
+            return
+        start_seconds, end_seconds = sorted(map(float, region.getRegion()))
+        self.setEventSampleRange(
+            round(start_seconds * self.sampling_rate),
+            round(end_seconds * self.sampling_rate),
+            show_status=True,
+        )
+
+    def _eventLineText(self, sample_boundary: int, prefix: str) -> str:
+        if self.data_timeline is None:
+            return prefix
+        value = self.data_timeline.absolute_time_for_sample(sample_boundary)
+        return f'{prefix} {value.strftime("%H:%M:%S.%f")[:-3]}'
+
+    def drawEventRange(self, plot_widget):
+        """Draw two synchronized draggable time markers and their shaded interval."""
+
+        if self.data_timeline is None or not hasattr(self, 'event_range_start_sample'):
+            plot_widget._event_range_visual = None
+            return
+        start_seconds = self.event_range_start_sample / self.sampling_rate
+        end_seconds = self.event_range_end_sample / self.sampling_rate
+        region = pg.LinearRegionItem(
+            values=(start_seconds, end_seconds),
+            orientation=pg.LinearRegionItem.Vertical,
+            brush=pg.mkBrush(14, 165, 233, 28),
+            hoverBrush=pg.mkBrush(14, 165, 233, 44),
+            movable=True,
+            bounds=(0.0, self.sampling_times / self.sampling_rate),
+            swapMode='sort',
+        )
+        region.setZValue(16)
+        start_pen = pg.mkPen('#16a34a', width=2)
+        end_pen = pg.mkPen('#dc2626', width=2)
+        region.lines[0].setPen(start_pen)
+        region.lines[0].setHoverPen(pg.mkPen('#15803d', width=3))
+        region.lines[1].setPen(end_pen)
+        region.lines[1].setHoverPen(pg.mkPen('#b91c1c', width=3))
+        start_label = pg.InfLineLabel(
+            region.lines[0],
+            text=self._eventLineText(self.event_range_start_sample, '开始'),
+            position=0.86,
+            color='#166534',
+            fill=pg.mkBrush(255, 255, 255, 205),
+            movable=True,
+        )
+        end_label = pg.InfLineLabel(
+            region.lines[1],
+            text=self._eventLineText(self.event_range_end_sample, '结束'),
+            position=0.72,
+            color='#991b1b',
+            fill=pg.mkBrush(255, 255, 255, 205),
+            movable=True,
+        )
+        region.sigRegionChangeFinished.connect(lambda item=region: self._eventRangeMoved(item))
+        plot_widget.addItem(region)
+        plot_widget._event_range_visual = {
+            'region': region,
+            'start_label': start_label,
+            'end_label': end_label,
+        }
+        if plot_widget not in self._event_range_plot_widgets:
+            self._event_range_plot_widgets.append(plot_widget)
+
+    def _syncEventRangePlots(self):
+        if not hasattr(self, 'event_range_start_sample'):
+            return
+        start_seconds = self.event_range_start_sample / self.sampling_rate
+        end_seconds = self.event_range_end_sample / self.sampling_rate
+        self._syncing_event_range = True
+        live_widgets = []
+        try:
+            for plot_widget in self._event_range_plot_widgets:
+                try:
+                    visual = getattr(plot_widget, '_event_range_visual', None)
+                    if visual is not None:
+                        visual['region'].setRegion((start_seconds, end_seconds))
+                        visual['start_label'].setText(
+                            self._eventLineText(self.event_range_start_sample, '开始')
+                        )
+                        visual['end_label'].setText(
+                            self._eventLineText(self.event_range_end_sample, '结束')
+                        )
+                    live_widgets.append(plot_widget)
+                except RuntimeError:
+                    continue
+        finally:
+            self._syncing_event_range = False
+        self._event_range_plot_widgets = live_widgets
+
+    def viewEventRange(self):
+        """Apply the marker range as the current non-destructive data view."""
+
+        self.setEventRangeFromInputs()
+        self.sampling_times_from_num = self.event_range_start_sample + 1
+        self.sampling_times_to_num = self.event_range_end_sample
+        self.updateDataRange()
+        self.updateDataParams()
+        self.updateImages()
+        self.syncDASFilterVisibleRange()
+
+    def restoreFullEventRange(self):
+        if not hasattr(self, 'sampling_times'):
+            return
+        self.setEventSampleRange(0, self.sampling_times)
+        self.sampling_times_from_num = 1
+        self.sampling_times_to_num = self.sampling_times
+        self.updateDataRange()
+        self.updateDataParams()
+        self.updateImages()
+        self.syncDASFilterVisibleRange()
 
     def addDataImageItem(self,
                          plot_widget: MyPlotWidget,
@@ -1304,6 +1577,9 @@ class MainWindow(QMainWindow):
 
         """
         self.plot_single_channel_time_widget.plot_item.clear()
+        self.plot_single_channel_time_widget.setTimeOrigin(
+            self.data_timeline.start_time if self.data_timeline is not None else None
+        )
 
         x = xAxis(self.current_sampling_times,
                   self.sampling_times_from_num,
@@ -1311,6 +1587,7 @@ class MainWindow(QMainWindow):
                   self.sampling_rate)
         data = self.data[self.channel_number - 1]
         self.plot_single_channel_time_widget.draw(x, data, pen=QColor('blue'))
+        self.drawEventRange(self.plot_single_channel_time_widget)
 
     def plotAmplitudeFrequency(self):
         """
@@ -1407,6 +1684,30 @@ class MainWindow(QMainWindow):
             table_widget_item = QTableWidgetItem(files[i])
             table_widget_item.setToolTip(os.path.abspath(os.path.join(self.file_path, files[i])))
             self.files_table_widget.setItem(i, 0, table_widget_item)
+        self.highlightLoadedFiles()
+
+    def highlightLoadedFiles(self):
+        """Highlight every directory-table row represented by the loaded data group."""
+
+        self.files_table_widget.clearSelection()
+        if self.data_group is None:
+            return
+        loaded_paths = {
+            os.path.normcase(os.path.realpath(segment.path))
+            for segment in self.data_group.segments
+        }
+        first_item = None
+        for row in range(self.files_table_widget.rowCount()):
+            item = self.files_table_widget.item(row, 0)
+            if item is None:
+                continue
+            item_path = os.path.normcase(os.path.realpath(os.path.join(self.file_path, item.text())))
+            if item_path in loaded_paths:
+                item.setSelected(True)
+                if first_item is None:
+                    first_item = item
+        if first_item is not None:
+            self.files_table_widget.scrollToItem(first_item, QAbstractItemView.PositionAtCenter)
 
     def updateDataRange(self):
         """
@@ -1433,21 +1734,49 @@ class MainWindow(QMainWindow):
         self.current_channels_line_edit.setText(str(self.current_channels))
 
     def updateDataGPSTime(self):
-        """
-        更新数据时间显示
-        Returns:
+        """Update corrected inferred times without claiming GPS/UTC semantics."""
 
-        """
+        if self.data_timeline is None:
+            self.gps_from_line_edit.clear()
+            self.gps_to_line_edit.clear()
+            self.time_correction_line_edit.setText(f'{self.time_correction_seconds:+.3f} s')
+            self.setEventRangeControlsEnabled(False)
+            return
+        self.gps_from_line_edit.setText(format_wall_time(self.data_timeline.start_time))
+        self.gps_to_line_edit.setText(format_wall_time(self.data_timeline.end_time))
+        self.time_correction_line_edit.setText(
+            f'{self.time_correction_seconds:+.3f} s（记录时间 + 修正）'
+        )
+        self.plot_gray_scale_widget.setTimeOrigin(self.data_timeline.start_time)
+        self.plot_single_channel_time_widget.setTimeOrigin(self.data_timeline.start_time)
+        self.multi_waves_time_axis.setOrigin(self.data_timeline.start_time)
+        self.updateEventRangeEditors()
+        if self.data_timeline.discontinuities:
+            self.statusBar().showMessage(
+                f'时间连续性提示：{len(self.data_timeline.discontinuities)} 个文件的记录结束时间'
+                f'与连续推算偏差超过 {self.data_timeline.continuity_tolerance_seconds:g} s；'
+                f'拼接数据仍按采样率连续显示。',
+                12000,
+            )
 
-        def f(s):
-            return list(map(str, map(int, s[:5]))) + [str(s[5])]
+    def rebuildDataTimeline(self):
+        """Recalculate the continuous wall-clock mapping after loading or correction changes."""
 
-        from_time, to_time = f(self.time[0]), f(self.time[-1])
-        from_time = ' - '.join(from_time)
-        to_time = ' - '.join(to_time)
-
-        self.gps_from_line_edit.setText(from_time)  # 更新开头文件GPS时间
-        self.gps_to_line_edit.setText(to_time)  # 更新末尾文件GPS时间
+        if self.data_group is None or not self._source_time_headers:
+            self.data_timeline = None
+            return
+        self.data_timeline = DataTimeline.from_data_group(
+            self.data_group,
+            self._source_time_headers,
+            correction_seconds=self.time_correction_seconds,
+        )
+        self.acquisition_params['时间口径'] = '文件名/文件头为采集结束时间；按采样率连续推算'
+        self.acquisition_params['设备时间修正'] = f'记录时间 {self.time_correction_seconds:+.3f} s'
+        self.acquisition_params['推算实际时间'] = (
+            f'{format_wall_time(self.data_timeline.start_time)} 至 '
+            f'{format_wall_time(self.data_timeline.end_time)}'
+        )
+        self.acquisition_params['时间连续性警告'] = str(len(self.data_timeline.discontinuities))
 
     def updateImages(self):
         """
@@ -1507,6 +1836,7 @@ class MainWindow(QMainWindow):
             return list(map(str, map(int, s[:5]))) + [str(s[5])]
 
         time, data = [], []
+        previous_filter_shape = tuple(self.raw_data.shape) if self.raw_data is not None else None
         self.file_names = sorted(
             self.file_names,
             key=lambda value: natural_sort_key(os.path.basename(str(value))),
@@ -1539,14 +1869,14 @@ class MainWindow(QMainWindow):
                 'BIN 多文件拼接加载',
             )
             for file_path, header, _file_sampling_time in metadata:
-                time.append(header[:6])  # GPS时间
+                time.append(header[:6])  # 文件记录的采集结束时间
                 data.append(bin2numpy(file_path, 0, channels_num))
 
             sampling_times_text = str(sampling_time) if len(set(file_sampling_times)) == 1 \
                 else '、'.join(map(str, file_sampling_times))
 
             self.acquisition_params = {
-                'GPS时间': f'{"-".join(f(time[0]))} 至 {"-".join(f(time[-1]))}',
+                '文件记录结束时间': f'{"-".join(f(time[0]))} 至 {"-".join(f(time[-1]))}',
                 '文件格式': '.bin',
                 '采样频率': f'{sampling_rate:g}Hz',
                 '传感点数（通道数）': f'{channels_num}',
@@ -1559,7 +1889,7 @@ class MainWindow(QMainWindow):
                 channels_num = int(raw_data[16])  # 传感点数
                 for file in self.file_names:
                     raw_data = np.fromfile(self.dataFilePath(file), dtype='<f4')
-                    time.append(raw_data[:6])  # GPS时间
+                    time.append(raw_data[:6])  # 文件记录的采集结束时间
                     data.append(raw_data[64:].reshape(channels_num, -1, order='F'))
                 acquisition_modes = {
                     1.: 'CNTE 连续模式',
@@ -1597,7 +1927,7 @@ class MainWindow(QMainWindow):
                 trigger_interval = raw_data[29]  # 触发间隔，s
 
                 self.acquisition_params = {
-                    'GPS时间': f'{"-".join(f(time[0]))} 至 {"-".join(f(time[-1]))}',
+                    '文件记录结束时间': f'{"-".join(f(time[0]))} 至 {"-".join(f(time[-1]))}',
                     '采集模式': f'{acquisition_modes[acquisition_mode]}',
                     '光纤类型': f'{fiber_types[fiber_type]}',
                     '光纤长度': f'{physical_fiber_length:.3f}m',
@@ -1629,11 +1959,11 @@ class MainWindow(QMainWindow):
                 sampling_time = (len(raw_data) - 10) // channels_num
                 for file in self.file_names:
                     raw_data = np.fromfile(self.dataFilePath(file), dtype='<f4')
-                    time.append(raw_data[:6])  # GPS时间
+                    time.append(raw_data[:6])  # 文件记录的采集结束时间
                     data.append(raw_data[10:].reshape(channels_num, -1))
 
                 self.acquisition_params = {
-                    'GPS时间': f'{"-".join(f(time[0]))} 至 {"-".join(f(time[-1]))}',
+                    '文件记录结束时间': f'{"-".join(f(time[0]))} 至 {"-".join(f(time[-1]))}',
                     '采样频率': f'{sampling_rate}Hz',
                     '传感点数（通道数）': f'{channels_num}',
                     '单个文件采样点数': f'{sampling_time}',
@@ -1659,6 +1989,8 @@ class MainWindow(QMainWindow):
         )
         self.selected_file_segment_index = None
         self.time = time
+        self._source_time_headers = [tuple(map(float, values[:6])) for values in time]
+        self.rebuildDataTimeline()
         self.data = detrendData(np.concatenate(data, axis=1))  # （通道数，采样次数）
         # Keep an immutable baseline so the new two-dimensional filter dialog
         # can preview, undo, and restore results without rereading the files.
@@ -1669,6 +2001,7 @@ class MainWindow(QMainWindow):
         # local to the group. Keep the most recent non-empty chain for explicit reuse.
         if self._das_filter_steps:
             self._last_das_filter_steps = clone_steps(self._das_filter_steps)
+            self._last_das_filter_shape = previous_filter_shape
         self._das_filter_steps = []
         self._vehicle_tracking_settings = None
         self.vehicle_trajectories = []
@@ -1767,6 +2100,58 @@ class MainWindow(QMainWindow):
     # """------------------------------------------------------------------------------------------------------------"""
     """操作-查看数据（时间）调用函数"""
 
+    def showTimeCorrectionDialog(self):
+        """Edit and persist the correction added to device-recorded end times."""
+
+        dialog = Dialog()
+        dialog.setWindowTitle('时间校正设置')
+        dialog.setMinimumWidth(520)
+        correction = QDoubleSpinBox()
+        correction.setRange(-86400.0, 86400.0)
+        correction.setDecimals(3)
+        correction.setSingleStep(0.1)
+        correction.setSuffix(' s')
+        correction.setValue(self.time_correction_seconds)
+        correction.setToolTip('设备时间落后真实时间时填正数；例如落后 12 秒填写 12')
+
+        formula = Label('计算公式：推算实际时间 = 文件名/文件头记录时间 + 修正秒数')
+        formula.setWordWrap(True)
+        example = Label('例如手机为 01:00:12、设备为 01:00:00，应填写 +12.000 s。')
+        example.setWordWrap(True)
+        example.setStyleSheet('color: #555;')
+        save_button = PushButton('保存并应用')
+        cancel_button = PushButton('取消')
+
+        def save():
+            self.time_correction_seconds = float(correction.value())
+            self.preferences.set_time_correction_seconds(self.time_correction_seconds)
+            self.rebuildDataTimeline()
+            self.updateDataGPSTime()
+            self.updateStitchedFilesList()
+            if hasattr(self, 'data'):
+                self.updateImages()
+            self.statusBar().showMessage(
+                f'时间修正已保存：记录时间 {self.time_correction_seconds:+.3f} s。',
+                8000,
+            )
+            dialog.accept()
+
+        save_button.clicked.connect(save)
+        cancel_button.clicked.connect(dialog.reject)
+        form = QFormLayout()
+        form.addRow('设备记录时间修正', correction)
+        buttons = QHBoxLayout()
+        buttons.addStretch(1)
+        buttons.addWidget(save_button)
+        buttons.addWidget(cancel_button)
+        layout = QVBoxLayout()
+        layout.addLayout(form)
+        layout.addWidget(formula)
+        layout.addWidget(example)
+        layout.addLayout(buttons)
+        dialog.setLayout(layout)
+        dialog.exec_()
+
     def setTimeRangeDialog(self):
         """
         调用按时间查看数据范围的对话框
@@ -1819,6 +2204,8 @@ class MainWindow(QMainWindow):
             from_num, to_num = 0, self.origin_data.shape[1]
 
         self.sampling_times_from_num, self.sampling_times_to_num = from_num + 1, to_num
+        self.setEventSampleRange(from_num, to_num)
+        self.syncDASFilterVisibleRange()
 
     # """------------------------------------------------------------------------------------------------------------"""
     """查看数据（通道）调用函数"""
@@ -1969,12 +2356,15 @@ class MainWindow(QMainWindow):
         Returns:
 
         """
-        plot_widget = MyPlotWidget('热力图', '时间（s）', '通道', check_mouse=False)
+        plot_widget = MyPlotWidget('热力图', '推算时间', '通道', check_mouse=False, time_axis=True)
+        plot_widget.setTimeOrigin(self.data_timeline.start_time if self.data_timeline is not None else None)
         self.tab_widget.addTab(plot_widget, '热力图')
 
         item = pg.ImageItem()
         item.setColorMap('viridis')
         self.addDataImageItem(plot_widget, item, self.data)
+        self.drawFileBoundaries(plot_widget, 0, self.current_channels)
+        self.drawEventRange(plot_widget)
 
     # """------------------------------------------------------------------------------------------------------------"""
     """绘制二值图调用函数"""
@@ -1990,11 +2380,14 @@ class MainWindow(QMainWindow):
         data = self.binary_image.run(self.data)
 
         if data is not None:
-            plot_widget = MyPlotWidget('二值图', '时间（s）', '通道', check_mouse=False)
+            plot_widget = MyPlotWidget('二值图', '推算时间', '通道', check_mouse=False, time_axis=True)
+            plot_widget.setTimeOrigin(self.data_timeline.start_time if self.data_timeline is not None else None)
             self.tab_widget.addTab(plot_widget, f'二值图 - 阈值={self.binary_image.threshold}')
 
             item = pg.ImageItem()
             self.addDataImageItem(plot_widget, item, data)
+            self.drawFileBoundaries(plot_widget, 0, self.current_channels)
+            self.drawEventRange(plot_widget)
 
     # """------------------------------------------------------------------------------------------------------------"""
     """计算数据特征调用的函数"""
@@ -2026,6 +2419,10 @@ class MainWindow(QMainWindow):
         if not hasattr(self, 'data') or self.data.size == 0:
             self.plot_multi_waves_widget.clear()
             return
+
+        self.multi_waves_time_axis.setOrigin(
+            self.data_timeline.start_time if self.data_timeline is not None else None
+        )
 
         self.multi_waves_x = xAxis(self.current_sampling_times,
                                    self.sampling_times_from_num,
@@ -2103,6 +2500,7 @@ class MainWindow(QMainWindow):
             channel_from - 0.5,
             channel_to + 0.5,
         )
+        self.drawEventRange(self.plot_multi_waves_widget)
         self.updateMultiWavesViewRange()
 
     def updateMultiWavesViewRange(self):
@@ -2127,9 +2525,20 @@ class MainWindow(QMainWindow):
         self.multi_waves_time_to_spin_box.setValue(time_to)
         self.multi_waves_time_from_spin_box.blockSignals(False)
         self.multi_waves_time_to_spin_box.blockSignals(False)
-        self.multi_waves_time_range_label.setText(
-            f'时间：{self.multi_waves_time_from:.3f} - '
-            f'{time_to:.3f} s')
+        if self.data_timeline is not None:
+            absolute_from = self.data_timeline.absolute_time_for_sample(
+                self.multi_waves_time_from * self.sampling_rate
+            )
+            absolute_to = self.data_timeline.absolute_time_for_sample(
+                time_to * self.sampling_rate
+            )
+            self.multi_waves_time_range_label.setText(
+                f'推算时间：{format_wall_time(absolute_from)} - {format_wall_time(absolute_to)}'
+            )
+        else:
+            self.multi_waves_time_range_label.setText(
+                f'时间：{self.multi_waves_time_from:.3f} - {time_to:.3f} s'
+            )
 
     def syncMultiWavesTimeRange(self, _view_box, view_range):
         """鼠标平移或缩放后，同步云图的时间窗口状态和输入框。"""
@@ -2217,8 +2626,10 @@ class MainWindow(QMainWindow):
                   self.sampling_times_to_num,
                   self.sampling_rate)
         data = cumulative_trapezoid(data, x, initial=0) * 1e6
-        plot_widget = MyPlotWidget('应变图', '时间（s）', '应变（με）', grid=True)
+        plot_widget = MyPlotWidget('应变图', '推算时间', '应变（με）', grid=True, time_axis=True)
+        plot_widget.setTimeOrigin(self.data_timeline.start_time if self.data_timeline is not None else None)
         plot_widget.draw(x, data, pen=QColor('blue'))
+        self.drawEventRange(plot_widget)
         self.tab_widget.addTab(plot_widget, f'应变图 - 通道号={self.channel_number}')
 
     # """------------------------------------------------------------------------------------------------------------"""
@@ -2340,6 +2751,7 @@ class MainWindow(QMainWindow):
             current_data=self.origin_data,
             segment_ranges=self.data_group.segment_ranges if self.data_group else None,
             previous_steps=self._last_das_filter_steps,
+            auto_reapply=self.auto_reapply_filter_pipeline,
             parent=self,
         )
         self.das_filter_dialog = dialog
@@ -2347,6 +2759,7 @@ class MainWindow(QMainWindow):
         dialog.committed.connect(self.commitDASFilterData)
         dialog.pipelineChanged.connect(self.setDASFilterPipeline)
         dialog.settingsChanged.connect(self.setDASFilterSettings)
+        dialog.autoReapplyChanged.connect(self.setAutoReapplyFilter)
         dialog.show()
         dialog.raise_()
         dialog.activateWindow()
@@ -2372,6 +2785,20 @@ class MainWindow(QMainWindow):
             segment_ranges=self.data_group.segment_ranges if self.data_group else None,
             previous_steps=self._last_das_filter_steps,
         )
+        self.das_filter_dialog.setAutoReapply(self.auto_reapply_filter_pipeline)
+        if self.auto_reapply_filter_pipeline and self._last_das_filter_steps and not self._das_filter_steps:
+            try:
+                steps = self.adaptPreviousFilterSteps()
+            except ValueError as error:
+                self.das_filter_dialog.status_label.setText(f'未自动应用上一组滤波链：{error}')
+                self.statusBar().showMessage(f'未自动应用上一组滤波链：{error}', 12000)
+            else:
+                if self.das_filter_dialog.replayExternalPipeline(
+                    steps,
+                    '切换文件后自动应用上一组滤波链',
+                    commit_after=True,
+                ):
+                    self.statusBar().showMessage('正在从新文件原始基线自动回放上一组滤波链……')
 
     def setDASFilterPipeline(self, steps):
         self._das_filter_steps = clone_steps(steps)
@@ -2379,6 +2806,63 @@ class MainWindow(QMainWindow):
 
     def setDASFilterSettings(self, settings):
         self._das_filter_settings = dict(settings)
+
+    def setAutoReapplyFilter(self, enabled: bool):
+        """Persist the cross-file filter replay preference."""
+
+        self.auto_reapply_filter_pipeline = bool(enabled)
+        self.preferences.set_auto_reapply_filter(self.auto_reapply_filter_pipeline)
+        if self.das_filter_dialog is not None:
+            self.das_filter_dialog.setAutoReapply(self.auto_reapply_filter_pipeline)
+
+    def adaptPreviousFilterSteps(self):
+        """Retarget full-data steps and strictly validate custom ranges for new data."""
+
+        if not self._last_das_filter_steps:
+            return []
+        if self.raw_data is None:
+            raise ValueError('当前没有可处理的新数据')
+        new_channels, new_samples = map(int, self.raw_data.shape)
+        if self._last_das_filter_shape is None:
+            old_channels, old_samples = new_channels, new_samples
+        else:
+            old_channels, old_samples = map(int, self._last_das_filter_shape)
+        adapted = []
+        for step in self._last_das_filter_steps:
+            channel_from, channel_to, sample_from, sample_to = step.selection
+            if channel_from == 1 and channel_to == old_channels:
+                channel_to = new_channels
+            elif channel_to > new_channels:
+                raise ValueError(
+                    f'步骤“{step.label}”的通道范围 {channel_from}-{channel_to} '
+                    f'超出新数据 1-{new_channels}'
+                )
+            if sample_from == 1 and sample_to == old_samples:
+                sample_to = new_samples
+            elif sample_to > new_samples:
+                raise ValueError(
+                    f'步骤“{step.label}”的采样范围 {sample_from}-{sample_to} '
+                    f'超出新数据 1-{new_samples}'
+                )
+            adapted.append(FilterStep(
+                algorithm=step.algorithm,
+                parameters=step.parameters,
+                selection=(channel_from, channel_to, sample_from, sample_to),
+                label=step.label,
+                enabled=step.enabled,
+                processing_mode=step.processing_mode,
+            ))
+        return adapted
+
+    def syncDASFilterVisibleRange(self):
+        if self.das_filter_dialog is None or self.das_filter_dialog.is_busy():
+            return
+        self.das_filter_dialog.set_visible_range((
+            self.channel_from_num,
+            self.channel_to_num,
+            self.sampling_times_from_num,
+            self.sampling_times_to_num,
+        ))
 
     def previewDASFilterData(self, data: np.ndarray, description: str = ''):
         """Refresh all plots with a dialog preview without changing the baseline."""
