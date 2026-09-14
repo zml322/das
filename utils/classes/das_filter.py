@@ -8,13 +8,14 @@ operation only to the requested channel/sample rectangle.
 from __future__ import annotations
 
 import traceback
-from typing import Dict, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from uuid import uuid4
 
 import numpy as np
 from scipy.ndimage import median_filter as scipy_median_filter
 from scipy.signal import iirfilter, sosfilt, zpk2sos
 
-from PyQt5.QtCore import QThread, pyqtSignal
+from PyQt5.QtCore import Qt, QThread, pyqtSignal
 from PyQt5.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -24,11 +25,21 @@ from PyQt5.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
     QLabel,
+    QListWidget,
+    QListWidgetItem,
     QMessageBox,
     QPushButton,
     QSpinBox,
     QVBoxLayout,
     QWidget,
+)
+
+from .data_group import ensure_memory_budget, format_bytes
+from .filter_pipeline import (
+    FilterPipeline,
+    FilterStep,
+    clone_steps,
+    replay_filter_pipeline,
 )
 
 
@@ -326,24 +337,32 @@ def apply_das_filter(
     return result
 
 
-class _FilterWorker(QThread):
+class _PipelineWorker(QThread):
     resultReady = pyqtSignal(object)
     errorRaised = pyqtSignal(str)
 
-    def __init__(self, data, sampling_rate, algorithm, parameters, parent=None):
+    def __init__(
+        self,
+        raw_data,
+        sampling_rate,
+        steps: Iterable[FilterStep],
+        segment_ranges: Sequence[Tuple[int, int]],
+        parent=None,
+    ):
         super().__init__(parent)
-        self._data = np.asarray(data, dtype=np.float32).copy()
+        self._raw_data = np.asarray(raw_data, dtype=np.float32).copy()
         self._sampling_rate = float(sampling_rate)
-        self._algorithm = algorithm
-        self._parameters = dict(parameters)
+        self._steps = clone_steps(steps)
+        self._segment_ranges = list(segment_ranges)
 
     def run(self) -> None:
         try:
-            result = apply_das_filter(
-                self._data,
+            result = replay_filter_pipeline(
+                self._raw_data,
                 self._sampling_rate,
-                self._algorithm,
-                self._parameters,
+                self._steps,
+                apply_das_filter,
+                self._segment_ranges,
             )
         except Exception:
             self.errorRaised.emit(traceback.format_exc())
@@ -352,10 +371,12 @@ class _FilterWorker(QThread):
 
 
 class DASFilterDialog(QDialog):
-    """Modal editor for applying filters to a selected DAS rectangle."""
+    """Persistent non-modal editor for an ordered, replayable filter chain."""
 
     previewReady = pyqtSignal(object, str)
     committed = pyqtSignal(object)
+    pipelineChanged = pyqtSignal(object)
+    settingsChanged = pyqtSignal(object)
 
     def __init__(
         self,
@@ -363,29 +384,49 @@ class DASFilterDialog(QDialog):
         sampling_rate: float,
         visible_range: Optional[Tuple[int, int, int, int]] = None,
         settings: Optional[Dict[str, object]] = None,
+        steps: Optional[Iterable[FilterStep]] = None,
+        current_data: Optional[np.ndarray] = None,
+        segment_ranges: Optional[Sequence[Tuple[int, int]]] = None,
+        previous_steps: Optional[Iterable[FilterStep]] = None,
         parent: Optional[QWidget] = None,
     ):
         super().__init__(parent)
-        self.setWindowTitle("DAS 二维滤波与去噪")
-        self.setModal(True)
-        self.resize(620, 620)
+        self.setWindowTitle("DAS 二维滤波工具")
+        self.setModal(False)
+        self.setWindowFlag(Qt.Tool, True)
+        self.resize(760, 780)
+        self.setMinimumSize(680, 680)
 
-        self.original_data = np.asarray(data, dtype=np.float32).copy()
-        if self.original_data.ndim != 2 or min(self.original_data.shape) == 0:
+        self.raw_data = np.asarray(data, dtype=np.float32).copy()
+        if self.raw_data.ndim != 2 or min(self.raw_data.shape) == 0:
             raise ValueError("DAS 数据必须是非空二维数组")
-        self.working_data = self.original_data.copy()
+        self.raw_data.setflags(write=False)
+        if current_data is None:
+            self.working_data = np.asarray(self.raw_data, dtype=np.float32).copy()
+        else:
+            self.working_data = np.asarray(current_data, dtype=np.float32).copy()
+            if self.working_data.shape != self.raw_data.shape:
+                raise ValueError("当前滤波数据与原始数据形状不一致")
         self.sampling_rate = float(sampling_rate)
         self.channel_count, self.sample_count = self.working_data.shape
         self.visible_range = self._normalize_range(
             visible_range or (1, self.channel_count, 1, self.sample_count)
         )
-        self._worker: Optional[_FilterWorker] = None
-        self._pending_slice = None
+        self.segment_ranges = list(segment_ranges or [(0, self.sample_count)])
+        self.pipeline = FilterPipeline(steps)
+        self.committed_steps = self.pipeline.steps()
+        self.previous_steps = clone_steps(previous_steps or [])
+        self._worker: Optional[_PipelineWorker] = None
+        self._pending_steps: List[FilterStep] = []
         self._pending_description = ""
-        self._operation_count = 0
+        self._pending_selected_row = -1
+        self._pending_commit = False
         self._syncing_range = False
+        self._refreshing_history = False
+        self._loading_step = False
         self._build_ui()
         self._restore_filter_settings(settings)
+        self._refresh_history()
 
     def _normalize_range(self, values: Tuple[int, int, int, int]):
         channel_from, channel_to, sample_from, sample_to = map(int, values)
@@ -427,6 +468,15 @@ class DASFilterDialog(QDialog):
         self.scope_combo.addItem("自定义范围", "custom")
         self.scope_combo.currentIndexChanged.connect(self._update_range_controls)
         range_form.addRow("作用范围", self.scope_combo)
+
+        self.processing_mode_combo = QComboBox()
+        self.processing_mode_combo.addItem("整体连续处理（跨文件边界）", "continuous")
+        self.processing_mode_combo.addItem("按文件分段处理", "per_segment")
+        self.processing_mode_combo.setEnabled(len(self.segment_ranges) > 1)
+        self.processing_mode_combo.setToolTip(
+            "确认文件连续时可整体处理；不确定时按文件分段可避免滤波跨越接缝。"
+        )
+        range_form.addRow("拼接处理", self.processing_mode_combo)
 
         channel_row = QHBoxLayout()
         self.channel_from = self._make_spinbox(1, self.channel_count, self.visible_range[0])
@@ -569,34 +619,67 @@ class DASFilterDialog(QDialog):
         parameter_form.addRow("", self.fk_hint)
         root.addWidget(parameter_group)
 
-        self.status_label = QLabel("修改参数后点击“应用并预览”；可连续应用多个步骤。")
+        history_group = QGroupBox("已应用滤波链（勾选表示启用）")
+        history_layout = QVBoxLayout(history_group)
+        self.history_list = QListWidget()
+        self.history_list.setMinimumHeight(150)
+        self.history_list.setAlternatingRowColors(True)
+        self.history_list.itemChanged.connect(self._history_item_changed)
+        self.history_list.currentRowChanged.connect(self._load_selected_step)
+        history_layout.addWidget(self.history_list)
+
+        history_button_row = QHBoxLayout()
+        self.update_step_button = QPushButton("更新选中")
+        self.delete_step_button = QPushButton("删除")
+        self.move_up_button = QPushButton("上移")
+        self.move_down_button = QPushButton("下移")
+        self.clear_steps_button = QPushButton("清空")
+        self.reuse_steps_button = QPushButton("应用上一组滤波链")
+        self.update_step_button.clicked.connect(self._update_selected_step)
+        self.delete_step_button.clicked.connect(self._delete_selected_step)
+        self.move_up_button.clicked.connect(lambda: self._move_selected_step(-1))
+        self.move_down_button.clicked.connect(lambda: self._move_selected_step(1))
+        self.clear_steps_button.clicked.connect(self._clear_pipeline)
+        self.reuse_steps_button.clicked.connect(self._reuse_previous_pipeline)
+        for button in (
+            self.update_step_button,
+            self.delete_step_button,
+            self.move_up_button,
+            self.move_down_button,
+            self.clear_steps_button,
+            self.reuse_steps_button,
+        ):
+            history_button_row.addWidget(button)
+        history_layout.addLayout(history_button_row)
+        root.addWidget(history_group, 1)
+
+        self.status_label = QLabel("设置参数后点击“添加并预览”，滤波链会从导入基线重新计算。")
         self.status_label.setWordWrap(True)
         root.addWidget(self.status_label)
-        close_hint = QLabel(
-            "提示：成功预览后，点“确定并关闭”或右上角 × 都会保留结果；"
-            "“取消并还原”会撤销本次会话中的全部滤波。"
-        )
+        close_hint = QLabel("关闭工具窗会保留当前预览；“撤销未确认”恢复到最近一次确认的滤波链。")
         close_hint.setWordWrap(True)
         close_hint.setStyleSheet("color: #555;")
         root.addWidget(close_hint)
 
         button_row = QHBoxLayout()
-        self.apply_button = QPushButton("应用并预览")
-        self.reset_button = QPushButton("恢复本次会话")
-        self.accept_button = QPushButton("确定并关闭")
-        self.cancel_button = QPushButton("取消")
-        self.accept_button.setToolTip("保留当前预览结果并关闭窗口")
-        self.cancel_button.setText("取消并还原")
-        self.cancel_button.setToolTip("撤销本次会话中的全部滤波，并恢复到打开窗口前的数据")
+        self.apply_button = QPushButton("添加并预览")
+        self.reset_button = QPushButton("恢复导入原始数据")
+        self.accept_button = QPushButton("确认当前结果")
+        self.cancel_button = QPushButton("撤销未确认")
+        self.close_button = QPushButton("关闭")
+        self.accept_button.setToolTip("把当前滤波链设为新的确认点")
+        self.cancel_button.setToolTip("恢复到最近一次点击“确认当前结果”时的滤波链")
         self.apply_button.clicked.connect(self._start_filter)
         self.reset_button.clicked.connect(self._reset)
-        self.accept_button.clicked.connect(self.accept)
-        self.cancel_button.clicked.connect(self.reject)
+        self.accept_button.clicked.connect(self._commit_current)
+        self.cancel_button.clicked.connect(self._revert_uncommitted)
+        self.close_button.clicked.connect(self.hide)
         for button in (
             self.apply_button,
             self.reset_button,
             self.accept_button,
             self.cancel_button,
+            self.close_button,
         ):
             button_row.addWidget(button)
         root.addLayout(button_row)
@@ -625,6 +708,7 @@ class DASFilterDialog(QDialog):
             "fk_frequency_high": self.fk_frequency_high.value(),
             "fk_velocity_low": self.fk_velocity_low.value(),
             "fk_velocity_high": self.fk_velocity_high.value(),
+            "processing_mode": self.processing_mode_combo.currentData(),
         }
 
     def _restore_filter_settings(self, settings: Optional[Dict[str, object]]) -> None:
@@ -646,6 +730,11 @@ class DASFilterDialog(QDialog):
         fk_direction_index = self.fk_direction.findData(settings.get("fk_direction"))
         if fk_direction_index >= 0:
             self.fk_direction.setCurrentIndex(fk_direction_index)
+        processing_mode_index = self.processing_mode_combo.findData(
+            settings.get("processing_mode")
+        )
+        if processing_mode_index >= 0:
+            self.processing_mode_combo.setCurrentIndex(processing_mode_index)
 
         def restore_value(widget, name: str, converter) -> None:
             if name not in settings:
@@ -813,35 +902,314 @@ class DASFilterDialog(QDialog):
             return {}
         return {"method": self.common_method.currentData()}
 
+    def pipeline_steps(self) -> List[FilterStep]:
+        return self.pipeline.steps()
+
+    def is_busy(self) -> bool:
+        return self._worker is not None and self._worker.isRunning()
+
+    def set_visible_range(self, values: Tuple[int, int, int, int]) -> None:
+        self.visible_range = self._normalize_range(values)
+        if self.scope_combo.currentData() == "visible":
+            self._update_range_controls()
+
+    def set_data(
+        self,
+        raw_data: np.ndarray,
+        sampling_rate: float,
+        visible_range: Tuple[int, int, int, int],
+        current_data: Optional[np.ndarray] = None,
+        steps: Optional[Iterable[FilterStep]] = None,
+        segment_ranges: Optional[Sequence[Tuple[int, int]]] = None,
+        previous_steps: Optional[Iterable[FilterStep]] = None,
+    ) -> None:
+        """Attach the persistent tool window to a newly loaded data group."""
+
+        if self.is_busy():
+            raise RuntimeError("滤波正在执行，暂时不能切换数据")
+        baseline = np.asarray(raw_data, dtype=np.float32).copy()
+        if baseline.ndim != 2 or min(baseline.shape) <= 0:
+            raise ValueError("DAS 数据必须是非空二维数组")
+        current = baseline.copy() if current_data is None else np.asarray(current_data, dtype=np.float32).copy()
+        if current.shape != baseline.shape:
+            raise ValueError("当前滤波数据与原始数据形状不一致")
+
+        baseline.setflags(write=False)
+        self.raw_data = baseline
+        self.working_data = current
+        self.sampling_rate = float(sampling_rate)
+        self.channel_count, self.sample_count = baseline.shape
+        self.visible_range = self._normalize_range(visible_range)
+        self.segment_ranges = list(segment_ranges or [(0, self.sample_count)])
+        self.pipeline = FilterPipeline(steps)
+        self.committed_steps = self.pipeline.steps()
+        self.previous_steps = clone_steps(previous_steps or [])
+
+        for box in (self.channel_from, self.channel_to):
+            box.setRange(1, self.channel_count)
+        for box in (self.sample_from, self.sample_to):
+            box.setRange(1, self.sample_count)
+        duration = self.sample_count / self.sampling_rate
+        for box in (self.time_from, self.time_to):
+            box.setRange(0.0, duration)
+        self.channel_window.setMaximum(max(1, self.channel_count))
+        self.sample_window.setMaximum(max(1, self.sample_count))
+        nyquist_limit = max(0.002, self.sampling_rate / 2.0 * 0.999)
+        for box in (self.frequency_low, self.frequency_high, self.frequency):
+            box.setMaximum(nyquist_limit)
+        for box in (self.fk_frequency_low, self.fk_frequency_high):
+            box.setMaximum(max(0.001, nyquist_limit))
+
+        self.scope_combo.setCurrentIndex(max(0, self.scope_combo.findData("visible")))
+        self.processing_mode_combo.setEnabled(len(self.segment_ranges) > 1)
+        if len(self.segment_ranges) <= 1:
+            self.processing_mode_combo.setCurrentIndex(
+                max(0, self.processing_mode_combo.findData("continuous"))
+            )
+        self._update_range_controls()
+        self._refresh_history()
+        self.status_label.setText(
+            f"已切换到新数据组：{self.channel_count} 通道，{self.sample_count} 采样点；"
+            "参数预设已保留，当前滤波链已清空。"
+        )
+
+    @staticmethod
+    def _set_combo_data(combo: QComboBox, value: object) -> None:
+        index = combo.findData(value)
+        if index >= 0:
+            combo.setCurrentIndex(index)
+
+    def _make_step(self, identifier: Optional[str] = None, enabled: bool = True) -> FilterStep:
+        return FilterStep(
+            algorithm=str(self.algorithm_combo.currentData()),
+            parameters=self._parameters(),
+            selection=self._selected_range(),
+            label=self.algorithm_combo.currentText(),
+            enabled=enabled,
+            processing_mode=str(self.processing_mode_combo.currentData()),
+            identifier=identifier or uuid4().hex,
+        )
+
+    @staticmethod
+    def _parameter_summary(step: FilterStep) -> str:
+        p = step.parameters
+        if step.algorithm in {"bandpass", "bandstop"}:
+            phase = "零相位" if p.get("zero_phase") else "单向"
+            return f"{p['frequency_low']:g}-{p['frequency_high']:g} Hz，{p['order']} 阶，{phase}"
+        if step.algorithm in {"lowpass", "highpass"}:
+            phase = "零相位" if p.get("zero_phase") else "单向"
+            return f"{p['frequency']:g} Hz，{p['order']} 阶，{phase}"
+        if step.algorithm == "spike":
+            return f"窗口 {p['channel_window']}×{p['sample_window']}，阈值 {p['threshold']:g}"
+        if step.algorithm == "common_mode":
+            return "中位数" if p.get("method") == "median" else "均值"
+        if step.algorithm == "fk":
+            return (
+                f"dx={p['channel_spacing']:g} m，频率 {p['fk_frequency_low']:g}-"
+                f"{p['fk_frequency_high']:g} Hz，速度 {p['fk_velocity_low']:g}-"
+                f"{p['fk_velocity_high']:g} m/s"
+            )
+        if step.algorithm == "mad_normalize":
+            return "每通道独立 MAD"
+        return str(p)
+
+    def _step_text(self, index: int, step: FilterStep) -> str:
+        channel_from, channel_to, sample_from, sample_to = step.selection
+        mode = "整体连续" if step.processing_mode == "continuous" else "按文件分段"
+        return (
+            f"{index + 1}. {step.label}｜{self._parameter_summary(step)}｜"
+            f"通道 {channel_from}-{channel_to}｜采样 {sample_from}-{sample_to}｜{mode}"
+        )
+
+    def _refresh_history(self, selected_row: int = -1) -> None:
+        self._refreshing_history = True
+        active_row = -1
+        try:
+            self.history_list.clear()
+            steps = self.pipeline.steps()
+            for index, step in enumerate(steps):
+                item = QListWidgetItem(self._step_text(index, step))
+                item.setFlags(item.flags() | Qt.ItemIsUserCheckable | Qt.ItemIsSelectable | Qt.ItemIsEnabled)
+                item.setCheckState(Qt.Checked if step.enabled else Qt.Unchecked)
+                item.setToolTip(f"参数：{step.parameters!r}\n步骤 ID：{step.identifier}")
+                self.history_list.addItem(item)
+            if steps:
+                active_row = selected_row if 0 <= selected_row < len(steps) else 0
+                self.history_list.setCurrentRow(active_row)
+        finally:
+            self._refreshing_history = False
+        self._update_history_buttons()
+        if active_row >= 0:
+            self._load_selected_step(active_row)
+
+    def _update_history_buttons(self) -> None:
+        row = self.history_list.currentRow()
+        count = len(self.pipeline)
+        selected = 0 <= row < count
+        self.update_step_button.setEnabled(selected and not self.is_busy())
+        self.delete_step_button.setEnabled(selected and not self.is_busy())
+        self.move_up_button.setEnabled(selected and row > 0 and not self.is_busy())
+        self.move_down_button.setEnabled(selected and row < count - 1 and not self.is_busy())
+        self.clear_steps_button.setEnabled(count > 0 and not self.is_busy())
+        self.reuse_steps_button.setEnabled(bool(self.previous_steps) and not self.is_busy())
+
+    def _load_selected_step(self, row: int) -> None:
+        self._update_history_buttons()
+        if self._refreshing_history or self._loading_step or not (0 <= row < len(self.pipeline)):
+            return
+        step = self.pipeline.steps()[row]
+        self._loading_step = True
+        try:
+            self._set_combo_data(self.algorithm_combo, step.algorithm)
+            self._set_combo_data(self.processing_mode_combo, step.processing_mode)
+            self._set_combo_data(self.scope_combo, "custom")
+            channel_from, channel_to, sample_from, sample_to = step.selection
+            self.channel_from.setValue(channel_from)
+            self.channel_to.setValue(channel_to)
+            self.sample_from.setValue(sample_from)
+            self.sample_to.setValue(sample_to)
+            p = step.parameters
+            mappings = (
+                (self.frequency_low, "frequency_low"),
+                (self.frequency_high, "frequency_high"),
+                (self.frequency, "frequency"),
+                (self.order, "order"),
+                (self.channel_window, "channel_window"),
+                (self.sample_window, "sample_window"),
+                (self.threshold, "threshold"),
+                (self.channel_spacing, "channel_spacing"),
+                (self.fk_frequency_low, "fk_frequency_low"),
+                (self.fk_frequency_high, "fk_frequency_high"),
+                (self.fk_velocity_low, "fk_velocity_low"),
+                (self.fk_velocity_high, "fk_velocity_high"),
+            )
+            for widget, key in mappings:
+                if key in p:
+                    widget.setValue(p[key])
+            if "zero_phase" in p:
+                self.zero_phase.setChecked(bool(p["zero_phase"]))
+            if "method" in p:
+                self._set_combo_data(self.common_method, p["method"])
+            if "fk_mode" in p:
+                self._set_combo_data(self.fk_mode, p["fk_mode"])
+            if "fk_direction" in p:
+                self._set_combo_data(self.fk_direction, p["fk_direction"])
+        finally:
+            self._loading_step = False
+
+    def _history_item_changed(self, item: QListWidgetItem) -> None:
+        if self._refreshing_history or self.is_busy():
+            return
+        row = self.history_list.row(item)
+        if not (0 <= row < len(self.pipeline)):
+            return
+        steps = self.pipeline.steps()
+        enabled = item.checkState() == Qt.Checked
+        if steps[row].enabled == enabled:
+            return
+        steps[row].enabled = enabled
+        state = "启用" if enabled else "禁用"
+        self._start_replay(steps, f"{state}第 {row + 1} 个滤波步骤", row)
+
     def _start_filter(self) -> None:
-        if self._worker is not None and self._worker.isRunning():
+        if self.is_busy():
             return
         channel_from, channel_to, sample_from, sample_to = self._selected_range()
         if channel_from > channel_to or sample_from > sample_to:
             QMessageBox.warning(self, "范围无效", "请确认通道和采样点的起止范围。")
             return
-        algorithm = self.algorithm_combo.currentData()
-        parameters = self._parameters()
-        data_slice = self.working_data[
-            channel_from - 1 : channel_to,
-            sample_from - 1 : sample_to,
-        ]
-        label = self.algorithm_combo.currentText()
-        self._pending_slice = (channel_from, channel_to, sample_from, sample_to)
-        self._pending_description = (
-            f"{label}：通道 {channel_from}-{channel_to}，采样点 {sample_from}-{sample_to}"
+        step = self._make_step()
+        steps = self.pipeline.steps()
+        steps.append(step)
+        self._start_replay(
+            steps,
+            f"添加 {step.label}：通道 {channel_from}-{channel_to}，采样点 {sample_from}-{sample_to}",
+            len(steps) - 1,
         )
+
+    def _update_selected_step(self) -> None:
+        row = self.history_list.currentRow()
+        if not (0 <= row < len(self.pipeline)) or self.is_busy():
+            return
+        steps = self.pipeline.steps()
+        current = steps[row]
+        steps[row] = self._make_step(current.identifier, current.enabled)
+        self._start_replay(steps, f"更新第 {row + 1} 个滤波步骤", row)
+
+    def _delete_selected_step(self) -> None:
+        row = self.history_list.currentRow()
+        if not (0 <= row < len(self.pipeline)) or self.is_busy():
+            return
+        steps = self.pipeline.steps()
+        removed = steps.pop(row)
+        self._start_replay(steps, f"删除 {removed.label}", min(row, len(steps) - 1))
+
+    def _move_selected_step(self, offset: int) -> None:
+        row = self.history_list.currentRow()
+        destination = row + int(offset)
+        if self.is_busy() or not (0 <= row < len(self.pipeline)) or not (0 <= destination < len(self.pipeline)):
+            return
+        steps = self.pipeline.steps()
+        step = steps.pop(row)
+        steps.insert(destination, step)
+        self._start_replay(steps, f"调整第 {row + 1} 个滤波步骤的顺序", destination)
+
+    def _clear_pipeline(self) -> None:
+        if self.is_busy() or len(self.pipeline) == 0:
+            return
+        self._start_replay([], "清空滤波链并恢复导入原始数据", -1)
+
+    def _reuse_previous_pipeline(self) -> None:
+        if self.is_busy():
+            return
+        if not self.previous_steps:
+            QMessageBox.information(self, "没有历史滤波链", "上一组数据没有可复用的滤波步骤。")
+            return
+        steps = clone_steps(self.previous_steps, new_identifiers=True)
+        self._start_replay(steps, "应用上一组数据的滤波链", len(steps) - 1)
+
+    def _start_replay(
+        self,
+        steps: Iterable[FilterStep],
+        description: str,
+        selected_row: int = -1,
+        commit_after: bool = False,
+    ) -> None:
+        if self.is_busy():
+            return
+        candidate = clone_steps(steps)
+        copies = 14.0 if any(step.enabled and step.algorithm == "fk" for step in candidate) else 6.0
+        try:
+            required, available = ensure_memory_budget(
+                self.channel_count,
+                self.sample_count,
+                copies,
+                "滤波链回放",
+            )
+        except MemoryError as error:
+            QMessageBox.warning(self, "内存不足", str(error))
+            return
+
+        self._pending_steps = candidate
+        self._pending_description = description
+        self._pending_selected_row = selected_row
+        self._pending_commit = commit_after
         self._set_busy(True)
-        self._worker = _FilterWorker(
-            data_slice,
+        self._worker = _PipelineWorker(
+            self.raw_data,
             self.sampling_rate,
-            algorithm,
-            parameters,
+            candidate,
+            self.segment_ranges,
             parent=self,
         )
-        self._worker.resultReady.connect(self._filter_finished)
+        self._worker.resultReady.connect(self._replay_finished)
         self._worker.errorRaised.connect(self._filter_failed)
-        self._worker.finished.connect(lambda: self._set_busy(False))
+        self._worker.finished.connect(self._worker_finished)
+        memory_text = f"预计峰值内存约 {format_bytes(required)}"
+        if available is not None:
+            memory_text += f"，当前可用约 {format_bytes(available)}"
+        self.status_label.setText(f"正在从原始基线回放 {len(candidate)} 个步骤；{memory_text}……")
+        self.settingsChanged.emit(self.filter_settings())
         self._worker.start()
 
     def _set_busy(self, busy: bool) -> None:
@@ -849,59 +1217,80 @@ class DASFilterDialog(QDialog):
         self.reset_button.setEnabled(not busy)
         self.accept_button.setEnabled(not busy)
         self.cancel_button.setEnabled(not busy)
+        self.history_list.setEnabled(not busy)
         if busy:
-            self.status_label.setText("正在处理所选范围，请稍候……")
+            for button in (
+                self.update_step_button,
+                self.delete_step_button,
+                self.move_up_button,
+                self.move_down_button,
+                self.clear_steps_button,
+                self.reuse_steps_button,
+            ):
+                button.setEnabled(False)
+        else:
+            self._update_history_buttons()
 
-    def _filter_finished(self, result) -> None:
-        channel_from, channel_to, sample_from, sample_to = self._pending_slice
-        self.working_data[
-            channel_from - 1 : channel_to,
-            sample_from - 1 : sample_to,
-        ] = result
-        self._operation_count += 1
-        self.status_label.setText(
-            f"已完成第 {self._operation_count} 个步骤：{self._pending_description}。"
-        )
+    def _replay_finished(self, result) -> None:
+        self.pipeline = FilterPipeline(self._pending_steps)
+        self.working_data = np.asarray(result, dtype=np.float32).copy()
+        self._refresh_history(self._pending_selected_row)
+        self.pipelineChanged.emit(self.pipeline.steps())
         self.previewReady.emit(self.working_data.copy(), self._pending_description)
+        if self._pending_commit:
+            self._store_commit()
+        else:
+            self.status_label.setText(
+                f"已从原始基线回放 {len(self.pipeline)} 个步骤：{self._pending_description}。"
+            )
 
     def _filter_failed(self, details: str) -> None:
-        self.status_label.setText("处理失败，请检查参数或缩小范围。")
+        self.status_label.setText("处理失败，请检查参数、范围或新数据的兼容性。")
         QMessageBox.critical(self, "滤波失败", details.splitlines()[-1])
 
+    def _worker_finished(self) -> None:
+        worker = self._worker
+        self._worker = None
+        if worker is not None:
+            worker.deleteLater()
+        self._pending_commit = False
+        self._set_busy(False)
+
     def _reset(self) -> None:
-        if self._worker is not None and self._worker.isRunning():
+        if self.is_busy():
             return
-        self.working_data = self.original_data.copy()
-        self._operation_count = 0
-        self.status_label.setText("已恢复本次对话框打开时的数据。")
-        self.previewReady.emit(self.working_data.copy(), "恢复原始预览")
+        self._start_replay([], "恢复导入原始数据", -1)
+
+    def _store_commit(self) -> None:
+        self.committed_steps = self.pipeline.steps()
+        self.committed.emit(self.working_data.copy())
+        self.settingsChanged.emit(self.filter_settings())
+        self.status_label.setText(f"已确认当前结果，共 {len(self.committed_steps)} 个滤波步骤。")
+
+    def _commit_current(self) -> None:
+        if not self.is_busy():
+            self._store_commit()
+
+    def _revert_uncommitted(self) -> None:
+        if self.is_busy():
+            return
+        self._start_replay(
+            self.committed_steps,
+            "撤销未确认修改，恢复最近确认的滤波链",
+            len(self.committed_steps) - 1,
+        )
 
     def accept(self) -> None:
-        if self._worker is not None and self._worker.isRunning():
+        if self.is_busy():
             return
-        self.committed.emit(self.working_data.copy())
-        super().accept()
+        self._store_commit()
+        self.hide()
 
     def reject(self) -> None:
-        if self._worker is not None and self._worker.isRunning():
-            return
-        super().reject()
+        self.hide()
 
     def closeEvent(self, event) -> None:
-        """Keep a completed preview when the title-bar close button is used.
+        """Hide the persistent tool and keep the current preview and history."""
 
-        The explicit Cancel button (and Escape) still call ``reject()`` and
-        therefore let the main window restore the data from before this dialog
-        was opened.  Closing with the title-bar button is treated like Accept
-        only after at least one filter operation completed successfully.
-        """
-        if self._worker is not None and self._worker.isRunning():
-            event.ignore()
-            return
-
-        if self._operation_count > 0:
-            self.accept()
-            event.accept()
-            return
-
-        super().closeEvent(event)
+        event.ignore()
+        self.hide()

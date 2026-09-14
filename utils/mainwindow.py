@@ -11,17 +11,20 @@ import sys
 
 import pandas as pd
 from PyQt5 import QtMultimedia
-from PyQt5.QtCore import QUrl, QEvent, QRectF
+from PyQt5.QtCore import Qt, QUrl, QEvent, QRectF, QTimer
+from PyQt5.QtGui import QBrush, QColor, QPen
 from PyQt5.QtWidgets import QApplication, QMainWindow, QFileDialog, qApp, QTabWidget, QTableWidget, QAbstractItemView, \
     QTableWidgetItem, QHeaderView, QTabBar, QScrollBar, QHBoxLayout, QDoubleSpinBox, QSplitter, QVBoxLayout, QWidget, \
-    QFormLayout, QGroupBox
+    QFormLayout, QGroupBox, QListWidget, QListWidgetItem, QGraphicsRectItem
 from matplotlib import pyplot as plt
 from scipy.integrate import cumulative_trapezoid
 
 from image.image import *
 from .classes.binary_image import BinaryImageHandler
+from .classes.data_group import DataGroup, ensure_memory_budget, natural_sort_key
 from .classes.data_sifting import DataSifting
 from .classes.das_filter import DASFilterDialog
+from .classes.filter_pipeline import FilterStep, clone_steps
 from .classes.daspy_converter_dialog import DASPyConverterDialog
 from .classes.emd import EMDHandler
 from .classes.feature import FeatureCalculator
@@ -36,6 +39,26 @@ from .function import *
 from .theme import PLOT_LABEL_POINT_SIZE, PLOT_TICK_POINT_SIZE, PLOT_TITLE_POINT_SIZE, plot_font, plot_html, ui_font_family
 from .widget import *
 from .version import __version__
+
+
+class FileSegmentBarItem(QGraphicsRectItem):
+    """Clickable strip identifying one source file in a stitched plot."""
+
+    def __init__(self, rect: QRectF, segment_index: int, on_clicked):
+        super().__init__(rect)
+        self.segment_index = int(segment_index)
+        self._on_clicked = on_clicked
+        self.setAcceptedMouseButtons(Qt.LeftButton)
+        self.setAcceptHoverEvents(True)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setZValue(20)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self._on_clicked(self.segment_index)
+            event.accept()
+            return
+        super().mousePressEvent(event)
 
 
 class MainWindow(QMainWindow):
@@ -117,8 +140,13 @@ class MainWindow(QMainWindow):
         self.filter = None
         self.das_filter_dialog = None
         self.raw_data = None
-        self._filter_dialog_original = None
         self._das_filter_settings = None
+        self._das_filter_steps = []
+        self._last_das_filter_steps = []
+        self.data_group = None
+        self.selected_file_segment_index = None
+        self._refreshing_stitched_files = False
+        self._file_segment_plot_widgets = []
         self._vehicle_tracking_settings = None
         self.vehicle_trajectories = []
         self._hide_vehicle_trajectories = False
@@ -487,6 +515,20 @@ class MainWindow(QMainWindow):
         file_area_vbox.addLayout(file_hbox)
         file_area_vbox.addWidget(self.files_table_widget, 1)
 
+        self.stitched_files_group = QGroupBox('当前拼接文件（0）')
+        self.stitched_files_list = QListWidget()
+        self.stitched_files_list.setAlternatingRowColors(True)
+        self.stitched_files_list.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.stitched_files_list.setMinimumHeight(104)
+        self.stitched_files_list.setMaximumHeight(220)
+        self.stitched_files_list.setToolTip('按拼接顺序显示来源文件；点击可高亮图中的对应分段')
+        self.stitched_files_list.currentRowChanged.connect(self._stitchedFileRowChanged)
+        stitched_files_vbox = QVBoxLayout()
+        stitched_files_vbox.setContentsMargins(8, 8, 8, 8)
+        stitched_files_vbox.addWidget(self.stitched_files_list)
+        self.stitched_files_group.setLayout(stitched_files_vbox)
+        file_area_vbox.addWidget(self.stitched_files_group)
+
         # 数据元信息移至导航区，避免长期挤占绘图区的上下空间。
         self.sampling_rate_line_edit = LineEditWithReg(digit=True, focus=False)
         self.current_sampling_times_line_edit = LineEditWithReg(focus=False)
@@ -774,6 +816,10 @@ class MainWindow(QMainWindow):
         Returns:
 
         """
+        if self.das_filter_dialog is not None and self.das_filter_dialog.is_busy():
+            QMessageBox.warning(self, '滤波处理中', '请等待滤波链计算完成后再退出。')
+            event.ignore()
+            return
         reply = QMessageBox.question(self, '提示', '是否退出？', QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
 
         # 判断返回值，如果点击的是Yes按钮，我们就关闭组件和应用，否则就忽略关闭事件
@@ -872,7 +918,229 @@ class MainWindow(QMainWindow):
         item = pg.ImageItem()
         self.addDataImageItem(self.plot_gray_scale_widget, item, self.data, use_image_controls=True,
                               show_color_bar=True)
+        self.drawFileBoundaries(self.plot_gray_scale_widget, 0, self.current_channels)
         self.drawVehicleTrajectories()
+
+    def drawFileBoundaries(self, plot_widget, y_min: float, y_max: float):
+        """Draw one clickable source strip per file plus dashed seam lines."""
+
+        if self.data_group is None or len(self.data_group.segments) <= 1:
+            plot_widget._file_segment_visuals = []
+            return
+        visible_start = (self.sampling_times_from_num - 1) / self.sampling_rate
+        visible_end = self.sampling_times_to_num / self.sampling_rate
+        strip_height = max((float(y_max) - float(y_min)) * 0.075, 0.1)
+        strip_y = float(y_max) - strip_height
+        visuals = []
+
+        for index, segment in enumerate(self.data_group.segments):
+            segment_start = segment.start_sample / self.sampling_rate
+            segment_end = segment.end_sample / self.sampling_rate
+            if segment_end <= visible_start or segment_start >= visible_end:
+                continue
+
+            detail = self.fileSegmentDetails(index)
+            bar = FileSegmentBarItem(
+                QRectF(segment_start, strip_y, segment_end - segment_start, strip_height),
+                index,
+                self.selectFileSegment,
+            )
+            bar.setToolTip(detail)
+            plot_widget.addItem(bar)
+
+            label = pg.TextItem(str(index + 1), color='#5b21b6', anchor=(0.5, 0.5))
+            label.setZValue(21)
+            label.setAcceptedMouseButtons(Qt.NoButton)
+            label.setPos((segment_start + segment_end) / 2, strip_y + strip_height / 2)
+            label.setToolTip(detail)
+            plot_widget.addItem(label)
+            visuals.append({
+                'index': index,
+                'start': segment_start,
+                'end': segment_end,
+                'label_y': strip_y + strip_height / 2,
+                'bar': bar,
+                'label': label,
+            })
+
+            if index > 0 and visible_start < segment_start < visible_end:
+                previous = self.data_group.segments[index - 1]
+                line = pg.InfiniteLine(
+                    pos=segment_start,
+                    angle=90,
+                    movable=False,
+                    pen=pg.mkPen('#7b2cbf', width=1.5, style=Qt.DashLine),
+                )
+                line.setZValue(19)
+                line.setToolTip(
+                    f'文件接缝：{previous.name} → {segment.name}\n'
+                    f'全局采样点：{segment.start_sample + 1}'
+                )
+                plot_widget.addItem(line)
+
+        plot_widget._file_segment_visuals = visuals
+        self._registerFileSegmentPlot(plot_widget)
+        self.updateFileSegmentLabels(plot_widget)
+        self._refreshFileSegmentHighlights()
+        QTimer.singleShot(0, lambda widget=plot_widget: self.updateFileSegmentLabels(widget))
+
+    @staticmethod
+    def _formatRelativeSeconds(value: float) -> str:
+        return f'{float(value):.6f}'.rstrip('0').rstrip('.') or '0'
+
+    @staticmethod
+    def _fileNameClock(name: str):
+        """Extract HH:MM:SS from the common DAS datetime filename pattern."""
+
+        match = re.search(
+            r'(?:19|20)\d{2}[-_]\d{1,2}[-_]\d{1,2}[-_]'
+            r'(\d{1,2})[-_](\d{1,2})[-_](\d{1,2})(?:[-_.]|$)',
+            os.path.basename(str(name)),
+        )
+        if match is None:
+            return None
+        return ':'.join(f'{int(part):02d}' for part in match.groups())
+
+    def fileSegmentLabel(self, index: int, pixel_width: float) -> str:
+        """Return a collision-resistant label for a source strip."""
+
+        if self.data_group is None or not (0 <= index < len(self.data_group.segments)):
+            return ''
+        sequence = str(index + 1)
+        if pixel_width < 58:
+            return sequence
+        segment = self.data_group.segments[index]
+        clock = self._fileNameClock(segment.name)
+        if clock:
+            return f'{sequence}  {clock}'
+        if pixel_width >= 180:
+            maximum = max(8, int(pixel_width // 8) - len(sequence) - 2)
+            name = segment.name
+            if len(name) > maximum:
+                name = f'{name[:maximum - 1]}…'
+            return f'{sequence}  {name}'
+        return sequence
+
+    def fileSegmentDetails(self, index: int) -> str:
+        """Build the full path, sample range, relative time and duration text."""
+
+        if self.data_group is None or not (0 <= index < len(self.data_group.segments)):
+            return ''
+        segment = self.data_group.segments[index]
+        sampling_rate = float(self.data_group.sampling_rate)
+        start_time = segment.start_sample / sampling_rate
+        end_time = segment.end_sample / sampling_rate
+        duration = segment.sample_count / sampling_rate
+        return (
+            f'第 {index + 1}/{len(self.data_group.segments)} 段\n'
+            f'文件：{segment.name}\n'
+            f'完整路径：{segment.path}\n'
+            f'全局采样范围：{segment.start_sample + 1} - {segment.end_sample} '
+            f'（{segment.sample_count} 点）\n'
+            f'起止相对时间：{self._formatRelativeSeconds(start_time)} - '
+            f'{self._formatRelativeSeconds(end_time)} s\n'
+            f'时长：{self._formatRelativeSeconds(duration)} s'
+        )
+
+    def updateStitchedFilesList(self):
+        """Refresh the left-side source list in exact stitching order."""
+
+        if not hasattr(self, 'stitched_files_list'):
+            return
+        self._refreshing_stitched_files = True
+        try:
+            self.stitched_files_list.clear()
+            segments = self.data_group.segments if self.data_group is not None else []
+            self.stitched_files_group.setTitle(f'当前拼接文件（{len(segments)}）')
+            digits = max(2, len(str(len(segments))))
+            for index, segment in enumerate(segments):
+                item = QListWidgetItem(f'{index + 1:0{digits}d}  {segment.name}')
+                item.setData(Qt.UserRole, index)
+                item.setToolTip(self.fileSegmentDetails(index))
+                self.stitched_files_list.addItem(item)
+            if self.selected_file_segment_index is not None and \
+                    self.selected_file_segment_index < len(segments):
+                self.stitched_files_list.setCurrentRow(self.selected_file_segment_index)
+            else:
+                self.stitched_files_list.setCurrentRow(-1)
+        finally:
+            self._refreshing_stitched_files = False
+
+    def _stitchedFileRowChanged(self, index: int):
+        if not self._refreshing_stitched_files and index >= 0:
+            self.selectFileSegment(index)
+
+    def selectFileSegment(self, index: int):
+        """Synchronize segment selection between the source list and all plots."""
+
+        if self.data_group is None or not (0 <= int(index) < len(self.data_group.segments)):
+            return
+        self.selected_file_segment_index = int(index)
+        if hasattr(self, 'stitched_files_list') and self.stitched_files_list.currentRow() != int(index):
+            self._refreshing_stitched_files = True
+            try:
+                self.stitched_files_list.setCurrentRow(int(index))
+            finally:
+                self._refreshing_stitched_files = False
+        self._refreshFileSegmentHighlights()
+        self.statusBar().showMessage(self.fileSegmentDetails(int(index)).replace('\n', '  |  '))
+
+    def _registerFileSegmentPlot(self, plot_widget):
+        if plot_widget not in self._file_segment_plot_widgets:
+            self._file_segment_plot_widgets.append(plot_widget)
+        if getattr(plot_widget, '_file_segment_range_tracking', False):
+            return
+        plot_widget._file_segment_range_tracking = True
+        plot_widget.getViewBox().sigXRangeChanged.connect(
+            lambda *_args, widget=plot_widget: self.updateFileSegmentLabels(widget)
+        )
+
+    def updateFileSegmentLabels(self, plot_widget):
+        """Reposition and shorten strip labels after zooming or resizing."""
+
+        visuals = getattr(plot_widget, '_file_segment_visuals', [])
+        if not visuals:
+            return
+        try:
+            view_box = plot_widget.getViewBox()
+            view_start, view_end = view_box.viewRange()[0]
+            view_width = max(float(view_end) - float(view_start), 1e-12)
+            pixel_scale = max(float(view_box.width()), 1.0) / view_width
+            for visual in visuals:
+                clipped_start = max(float(visual['start']), float(view_start))
+                clipped_end = min(float(visual['end']), float(view_end))
+                is_visible = clipped_end > clipped_start
+                visual['label'].setVisible(is_visible)
+                if not is_visible:
+                    continue
+                pixel_width = (clipped_end - clipped_start) * pixel_scale
+                visual['label'].setText(self.fileSegmentLabel(visual['index'], pixel_width))
+                visual['label'].setPos(
+                    (clipped_start + clipped_end) / 2,
+                    visual['label_y'],
+                )
+        except RuntimeError:
+            return
+
+    def _refreshFileSegmentHighlights(self):
+        selected = self.selected_file_segment_index
+        live_widgets = []
+        for plot_widget in self._file_segment_plot_widgets:
+            try:
+                visuals = getattr(plot_widget, '_file_segment_visuals', [])
+                for visual in visuals:
+                    is_selected = visual['index'] == selected
+                    color = QColor(245, 158, 11, 112) if is_selected else QColor(124, 58, 237, 60)
+                    outline = QColor('#d97706') if is_selected else QColor(124, 58, 237, 120)
+                    pen = QPen(outline, 1.5 if is_selected else 0.8)
+                    pen.setCosmetic(True)
+                    visual['bar'].setBrush(QBrush(color))
+                    visual['bar'].setPen(pen)
+                    visual['label'].setColor('#92400e' if is_selected else '#5b21b6')
+                live_widgets.append(plot_widget)
+            except RuntimeError:
+                continue
+        self._file_segment_plot_widgets = live_widgets
 
     def addDataImageItem(self,
                          plot_widget: MyPlotWidget,
@@ -1078,6 +1346,9 @@ class MainWindow(QMainWindow):
         Returns:
 
         """
+        if self.das_filter_dialog is not None and self.das_filter_dialog.is_busy():
+            printError('滤波链正在计算，请等待完成后再切换文件')
+            return
         self.file_names = []
         item_index = self.files_table_widget.currentIndex().row()  # 获取当前点击的文件行索引
         for i in range(self.files_read_number):
@@ -1088,6 +1359,7 @@ class MainWindow(QMainWindow):
         self.readData()
         self.initLocalParams()
         self.updateAll()
+        self.syncDASFilterDialog()
 
     def changeChannelNumber(self):
         """
@@ -1112,7 +1384,7 @@ class MainWindow(QMainWindow):
         self.filter_menu.setEnabled(True)
         self.analysis_menu.setEnabled(True)
         self.das_filter_action.setEnabled(True)
-        self.reset_das_filter_action.setEnabled(self.raw_data is not None)
+        self.reset_das_filter_action.setEnabled(bool(self._das_filter_steps))
 
         setPicture(self.player_play_button, play_jpg, 'play.jpg')
         self.player_play_button.setDisabled(False)
@@ -1126,7 +1398,10 @@ class MainWindow(QMainWindow):
         """
         self.file_path_line_edit.setText(self.file_path)
         self.file_path_line_edit.setToolTip(os.path.abspath(self.file_path))
-        files = [f for f in os.listdir(self.file_path) if f.lower().endswith(DAS_FILE_SUFFIXES)]
+        files = sorted(
+            (f for f in os.listdir(self.file_path) if f.lower().endswith(DAS_FILE_SUFFIXES)),
+            key=natural_sort_key,
+        )
         self.files_table_widget.setRowCount(len(files))  # 有多少个文件就显示多少行
         for i in range(len(files)):
             table_widget_item = QTableWidgetItem(files[i])
@@ -1193,6 +1468,7 @@ class MainWindow(QMainWindow):
         """
         self.updateWidgetsState()
         self.updateFile()
+        self.updateStitchedFilesList()
         self.updateDataRange()
         self.updateDataParams()
         self.updateDataGPSTime()
@@ -1207,14 +1483,18 @@ class MainWindow(QMainWindow):
         Returns:
 
         """
+        if self.das_filter_dialog is not None and self.das_filter_dialog.is_busy():
+            printError('滤波链正在计算，请等待完成后再导入文件')
+            return
         file_names = QFileDialog.getOpenFileNames(self, '导入', '', DAS_FILE_FILTER)[0]  # 打开多个数据文件
         if file_names:
-            self.file_names = file_names
+            self.file_names = sorted(file_names, key=lambda value: natural_sort_key(os.path.basename(value)))
             self.file_path = os.path.dirname(self.file_names[0])
 
             self.readData()
             self.initLocalParams()
             self.updateAll()
+            self.syncDASFilterDialog()
 
     def readData(self):
         """
@@ -1227,6 +1507,10 @@ class MainWindow(QMainWindow):
             return list(map(str, map(int, s[:5]))) + [str(s[5])]
 
         time, data = [], []
+        self.file_names = sorted(
+            self.file_names,
+            key=lambda value: natural_sort_key(os.path.basename(str(value))),
+        )
         suffixes = {self.dataFileSuffix(file) for file in self.file_names}
         if len(suffixes) != 1:
             raise ValueError('一次只能读取同一种格式的数据文件。')
@@ -1234,7 +1518,8 @@ class MainWindow(QMainWindow):
         suffix = suffixes.pop()
         first_file_path = self.dataFilePath(self.file_names[0])
         if suffix == '.bin':
-            first_header, sampling_time, channels_num, sampling_rate, _ = read_bin_header(first_file_path)
+            _first_header, sampling_time, channels_num, sampling_rate, _ = read_bin_header(first_file_path)
+            metadata = []
             file_sampling_times = []
             for file in self.file_names:
                 file_path = self.dataFilePath(file)
@@ -1244,9 +1529,18 @@ class MainWindow(QMainWindow):
                 if not np.isclose(file_sampling_rate, sampling_rate):
                     raise ValueError(f'{file_path}: 采样率不一致，期望 {sampling_rate:g}Hz，'
                                      f'实际 {file_sampling_rate:g}Hz')
+                metadata.append((file_path, header, file_sampling_time))
+                file_sampling_times.append(file_sampling_time)
+
+            ensure_memory_budget(
+                channels_num,
+                sum(file_sampling_times),
+                4.5,
+                'BIN 多文件拼接加载',
+            )
+            for file_path, header, _file_sampling_time in metadata:
                 time.append(header[:6])  # GPS时间
                 data.append(bin2numpy(file_path, 0, channels_num))
-                file_sampling_times.append(file_sampling_time)
 
             sampling_times_text = str(sampling_time) if len(set(file_sampling_times)) == 1 \
                 else '、'.join(map(str, file_sampling_times))
@@ -1348,15 +1642,34 @@ class MainWindow(QMainWindow):
         else:
             raise ValueError(f'不支持的数据格式：{suffix}')
 
+        sample_counts = [int(array.shape[1]) for array in data]
+        total_samples = sum(sample_counts)
+        ensure_memory_budget(
+            channels_num,
+            total_samples,
+            4.5,
+            '多文件拼接加载',
+        )
+        source_paths = [self.dataFilePath(file) for file in self.file_names]
+        self.data_group = DataGroup.from_files(
+            source_paths,
+            sample_counts,
+            channels_num,
+            sampling_rate,
+        )
+        self.selected_file_segment_index = None
         self.time = time
         self.data = detrendData(np.concatenate(data, axis=1))  # （通道数，采样次数）
         # Keep an immutable baseline so the new two-dimensional filter dialog
         # can preview, undo, and restore results without rereading the files.
         self.raw_data = np.asarray(self.data, dtype=np.float32).copy()
+        self.raw_data.setflags(write=False)
         self.origin_data = self.raw_data.copy()
-        # Filter settings belong to the loaded data.  A successful file change
-        # must start from the dialog defaults appropriate for its sample rate.
-        self._das_filter_settings = None
+        # Parameter presets live across data groups, while the applied chain is
+        # local to the group. Keep the most recent non-empty chain for explicit reuse.
+        if self._das_filter_steps:
+            self._last_das_filter_steps = clone_steps(self._das_filter_steps)
+        self._das_filter_steps = []
         self._vehicle_tracking_settings = None
         self.vehicle_trajectories = []
         self._hide_vehicle_trajectories = False
@@ -1364,6 +1677,11 @@ class MainWindow(QMainWindow):
         self.channels_num = channels_num
         self.sampling_times = self.data.shape[1]
         self.acquisition_params['总采样点数'] = f'{self.sampling_times}'
+        self.acquisition_params['拼接文件数'] = f'{len(self.data_group.segments)}'
+        self.acquisition_params['拼接顺序'] = ' → '.join(
+            segment.name for segment in self.data_group.segments
+        )
+        self.updateStitchedFilesList()
 
     def dataFilePath(self, file_name):
         """
@@ -1780,6 +2098,11 @@ class MainWindow(QMainWindow):
                 self.multi_waves_x,
                 self.data[channel_number - self.multi_waves_channel_min] + channel_number,
                 pen=QColor(self.multi_waves_colors[(channel_number - 1) % len(self.multi_waves_colors)]))
+        self.drawFileBoundaries(
+            self.plot_multi_waves_widget,
+            channel_from - 0.5,
+            channel_to + 0.5,
+        )
         self.updateMultiWavesViewRange()
 
     def updateMultiWavesViewRange(self):
@@ -1990,33 +2313,72 @@ class MainWindow(QMainWindow):
             self.updateImages()
 
     def showDASFilterDialog(self):
-        """Open the two-dimensional DASPy-compatible filter dialog."""
+        """Show the persistent non-modal two-dimensional filter tool."""
         if self.raw_data is None or not hasattr(self, 'origin_data'):
             printError('请先导入 DAS 数据')
             return
 
-        self._filter_dialog_original = np.asarray(self.origin_data, dtype=np.float32).copy()
         visible_range = (
             self.channel_from_num,
             self.channel_to_num,
             self.sampling_times_from_num,
             self.sampling_times_to_num,
         )
+        if self.das_filter_dialog is not None:
+            self.das_filter_dialog.set_visible_range(visible_range)
+            self.das_filter_dialog.show()
+            self.das_filter_dialog.raise_()
+            self.das_filter_dialog.activateWindow()
+            return
+
         dialog = DASFilterDialog(
-            self.origin_data,
+            self.raw_data,
             self.sampling_rate,
             visible_range=visible_range,
             settings=self._das_filter_settings,
+            steps=self._das_filter_steps,
+            current_data=self.origin_data,
+            segment_ranges=self.data_group.segment_ranges if self.data_group else None,
+            previous_steps=self._last_das_filter_steps,
             parent=self,
         )
         self.das_filter_dialog = dialog
         dialog.previewReady.connect(self.previewDASFilterData)
         dialog.committed.connect(self.commitDASFilterData)
-        dialog.rejected.connect(self.cancelDASFilterData)
-        dialog.exec_()
-        self._das_filter_settings = dialog.filter_settings()
-        self.das_filter_dialog = None
-        self._filter_dialog_original = None
+        dialog.pipelineChanged.connect(self.setDASFilterPipeline)
+        dialog.settingsChanged.connect(self.setDASFilterSettings)
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
+    def syncDASFilterDialog(self):
+        """Retarget an existing tool window after a successful data switch."""
+
+        if self.das_filter_dialog is None or self.raw_data is None:
+            return
+        self._das_filter_settings = self.das_filter_dialog.filter_settings()
+        visible_range = (
+            self.channel_from_num,
+            self.channel_to_num,
+            self.sampling_times_from_num,
+            self.sampling_times_to_num,
+        )
+        self.das_filter_dialog.set_data(
+            self.raw_data,
+            self.sampling_rate,
+            visible_range,
+            current_data=self.origin_data,
+            steps=self._das_filter_steps,
+            segment_ranges=self.data_group.segment_ranges if self.data_group else None,
+            previous_steps=self._last_das_filter_steps,
+        )
+
+    def setDASFilterPipeline(self, steps):
+        self._das_filter_steps = clone_steps(steps)
+        self.reset_das_filter_action.setEnabled(bool(self._das_filter_steps))
+
+    def setDASFilterSettings(self, settings):
+        self._das_filter_settings = dict(settings)
 
     def previewDASFilterData(self, data: np.ndarray, description: str = ''):
         """Refresh all plots with a dialog preview without changing the baseline."""
@@ -2033,28 +2395,24 @@ class MainWindow(QMainWindow):
         self.origin_data = np.asarray(data, dtype=np.float32).copy()
         self.updateDataRange()
         self.updateImages()
-        self.reset_das_filter_action.setEnabled(True)
+        self.reset_das_filter_action.setEnabled(bool(self._das_filter_steps))
         self.statusBar().showMessage('二维滤波结果已应用；可从“滤波”菜单恢复原始数据。', 8000)
-
-    def cancelDASFilterData(self):
-        """Restore the data that was present before opening the dialog."""
-        if self._filter_dialog_original is None:
-            return
-        self._hide_vehicle_trajectories = False
-        self.origin_data = self._filter_dialog_original.copy()
-        self.updateDataRange()
-        self.updateImages()
-        self.statusBar().showMessage('已取消二维滤波，恢复打开对话框前的数据。', 5000)
 
     def resetDASFilterData(self):
         """Restore the detrended data loaded from disk."""
         if self.raw_data is None:
             return
+        if self.das_filter_dialog is not None and self.das_filter_dialog.is_busy():
+            printError('滤波链正在计算，请等待完成后再恢复原始数据')
+            return
         self.clearVehicleTrajectories(update=False)
+        self._das_filter_steps = []
         self.origin_data = np.asarray(self.raw_data, dtype=np.float32).copy()
         self.updateDataRange()
         self.updateImages()
         self.reset_das_filter_action.setEnabled(False)
+        if self.das_filter_dialog is not None:
+            self.syncDASFilterDialog()
         self.statusBar().showMessage('已恢复导入后的原始数据（包含现有去趋势步骤）。', 8000)
 
     # """------------------------------------------------------------------------------------------------------------"""
