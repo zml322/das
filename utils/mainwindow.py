@@ -8,6 +8,7 @@ import ctypes
 import os.path
 import re
 import sys
+from datetime import datetime
 
 import pandas as pd
 from PyQt5 import QtMultimedia
@@ -24,7 +25,14 @@ from .classes.binary_image import BinaryImageHandler
 from .classes.data_group import DataGroup, ensure_memory_budget, natural_sort_key
 from .classes.data_timeline import DataTimeline, format_wall_time
 from .classes.data_sifting import DataSifting
-from .classes.das_filter import DASFilterDialog
+from .classes.das_filter import ALGORITHM_LABELS, DASFilterDialog
+from .classes.filter_history import (
+    add_recent_history,
+    history_entry_steps,
+    make_history_entry,
+    normalize_history,
+    upsert_named_history,
+)
 from .classes.filter_pipeline import FilterStep, clone_steps
 from .classes.daspy_converter_dialog import DASPyConverterDialog
 from .classes.emd import EMDHandler
@@ -32,6 +40,7 @@ from .classes.feature import FeatureCalculator
 from .classes.filter import FilterHandler
 from .classes.snr import SNRCalculator
 from .classes.spectrum import SpectrumHandler
+from .classes.speed_ruler import SpeedRulerROI, calculate_projected_speed, format_speed_measurement
 from .classes.vehicle_tracking_dialog import VehicleTrackingDialog
 from .classes.wavelet import DWTHandler, CWTHandler
 from .classes.wavelet_packet import DWPTHandler
@@ -66,13 +75,14 @@ class FileSegmentBarItem(QGraphicsRectItem):
 class MainWindow(QMainWindow):
     """主窗口"""
 
-    def __init__(self):
+    def __init__(self, preferences=None):
         """
         初始化界面
         Returns:
 
         """
         super().__init__()
+        self._provided_preferences = preferences
         self.initMainWindow()
         self.initGlobalParams()
         self.initUI()
@@ -130,7 +140,6 @@ class MainWindow(QMainWindow):
         # 每次打开程序初始化的参数
         self.channel_number = 1  # 当前通道
         self.channel_number_step = 1  # 通道号递增减步长
-        self.files_read_number = 1  # 表格连续读取文件数
 
         # 滤波器是否更新数据
         self.update_data = False
@@ -154,12 +163,20 @@ class MainWindow(QMainWindow):
         self._file_segment_plot_widgets = []
         self._event_range_plot_widgets = []
         self._syncing_event_range = False
-        self.preferences = AppPreferences()
+        self.preferences = self._provided_preferences or AppPreferences()
         self.time_correction_seconds = self.preferences.time_correction_seconds()
         self.auto_reapply_filter_pipeline = self.preferences.auto_reapply_filter()
+        stored_filter_history = self.preferences.filter_pipeline_history()
+        self._filter_pipeline_history = normalize_history(stored_filter_history)
+        if stored_filter_history != self._filter_pipeline_history:
+            self.preferences.set_filter_pipeline_history(self._filter_pipeline_history)
         self._vehicle_tracking_settings = None
         self.vehicle_trajectories = []
         self._hide_vehicle_trajectories = False
+        self.speed_ruler_channel_spacing = 4.0
+        self.speed_ruler_active = False
+        self.speed_ruler_points = None
+        self.speed_ruler_roi = None
 
         # 二值图
         self.binary_image = None
@@ -291,12 +308,6 @@ class MainWindow(QMainWindow):
                                                         '设置切换通道时的步长',
                                                         self.changeChannelNumberStep)
 
-        # 操作-设置文件读取数量
-        self.change_files_read_number_action = Action(self.operation_menu,
-                                                      '设置文件读取数量',
-                                                      '设置从表格选中文件时的读取数量，从选中的文件开始算起',
-                                                      self.changeFilesReadNumberDialog)
-
         # 绘图
         self.plot_menu = Menu(self.menu_bar, '绘图', enabled=False)
 
@@ -406,6 +417,12 @@ class MainWindow(QMainWindow):
             '使用低频峰值和卡尔曼跟踪拾取车辆时空轨迹',
             self.showVehicleTrackingDialog,
         )
+        self.speed_ruler_action = Action(
+            self.analysis_menu,
+            '车辆速度标尺',
+            '在灰度图上添加可拖动的车辆投影速度测量线',
+            self.addOrResetSpeedRuler,
+        )
 
         # 滤波-EMD
         self.emd_menu = Menu(self.filter_menu, 'EMD', status_tip='使用EMD及衍生方式滤波')
@@ -499,8 +516,6 @@ class MainWindow(QMainWindow):
         file_area_vbox.setContentsMargins(0, 0, 0, 0)
         file_area_vbox.setSpacing(8)
 
-        file_area_title = Label('数据文件')
-        file_area_title.setObjectName('sectionTitle')
         self.file_path_line_edit = LineEdit(focus=False)
         self.file_path_line_edit.setPlaceholderText('选择数据文件夹')
 
@@ -520,18 +535,29 @@ class MainWindow(QMainWindow):
         self.files_table_widget.verticalHeader().setVisible(False)
         self.files_table_widget.setWordWrap(False)
         self.files_table_widget.setAlternatingRowColors(True)
-        self.files_table_widget.setToolTip('鼠标悬停在文件名上可查看完整路径')
+        self.files_table_widget.setToolTip(
+            '鼠标悬停可查看完整路径；使用 Ctrl 或 Shift 选择多个文件，选择完成后点击确定加载'
+        )
         QTableWidget.resizeRowsToContents(self.files_table_widget)
         self.files_table_widget.setSelectionBehavior(QAbstractItemView.SelectRows)  # 设置一次选中一排内容
-        self.files_table_widget.setSelectionMode(QAbstractItemView.MultiSelection)
-        self.files_table_widget.itemClicked.connect(self.selectDataFromTable)
+        self.files_table_widget.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.files_table_widget.itemSelectionChanged.connect(self.updatePendingFileSelection)
+
+        self.pending_file_selection_label = Label('待拼接：请选择文件')
+        self.pending_file_selection_label.setWordWrap(True)
+        self.pending_file_selection_label.setStyleSheet('color: #555;')
+        self.load_selected_files_button = PushButton('确定加载并拼接')
+        self.load_selected_files_button.setEnabled(False)
+        self.load_selected_files_button.setToolTip('按文件表中的顺序一次性读取、拼接并绘制所选文件')
+        self.load_selected_files_button.clicked.connect(self.selectDataFromTable)
 
         # 文件区布局
         file_hbox.addWidget(self.file_path_line_edit)
         file_hbox.addWidget(change_file_path_button)
-        file_area_vbox.addWidget(file_area_title)
         file_area_vbox.addLayout(file_hbox)
         file_area_vbox.addWidget(self.files_table_widget, 1)
+        file_area_vbox.addWidget(self.pending_file_selection_label)
+        file_area_vbox.addWidget(self.load_selected_files_button)
 
         self.stitched_files_group = QGroupBox('当前拼接文件（0）')
         self.stitched_files_list = QListWidget()
@@ -563,20 +589,23 @@ class MainWindow(QMainWindow):
                 self.time_correction_line_edit,
         ):
             field.setReadOnly(True)
+            field.setFixedHeight(28)
+            field.setStyleSheet('QLineEdit { min-height: 0; padding: 1px 4px; }')
 
-        overview_group = QGroupBox('数据概览')
-        overview_form = QFormLayout()
-        overview_form.setContentsMargins(8, 8, 8, 8)
-        overview_form.setHorizontalSpacing(8)
-        overview_form.setVerticalSpacing(6)
-        overview_form.addRow('采样率', self.sampling_rate_line_edit)
-        overview_form.addRow('采样次数', self.current_sampling_times_line_edit)
-        overview_form.addRow('通道数', self.current_channels_line_edit)
-        overview_form.addRow('推算开始时间', self.gps_from_line_edit)
-        overview_form.addRow('推算结束时间', self.gps_to_line_edit)
-        overview_form.addRow('设备时间修正', self.time_correction_line_edit)
-        overview_group.setLayout(overview_form)
-        file_area_vbox.addWidget(overview_group)
+        self.overview_group = QGroupBox('数据概览')
+        self.overview_form = QFormLayout()
+        self.overview_form.setContentsMargins(6, 4, 6, 4)
+        self.overview_form.setHorizontalSpacing(6)
+        self.overview_form.setVerticalSpacing(2)
+        self.overview_form.addRow('采样率', self.sampling_rate_line_edit)
+        self.overview_form.addRow('采样次数', self.current_sampling_times_line_edit)
+        self.overview_form.addRow('通道数', self.current_channels_line_edit)
+        self.overview_form.addRow('当前推算开始时间', self.gps_from_line_edit)
+        self.overview_form.addRow('当前推算结束时间', self.gps_to_line_edit)
+        self.overview_form.addRow('设备时间修正', self.time_correction_line_edit)
+        self.overview_group.setLayout(self.overview_form)
+        self.overview_group.setStyleSheet('QGroupBox { margin-top: 6px; padding-top: 4px; }')
+        file_area_vbox.addWidget(self.overview_group)
 
         # 单通道操作只在“单通道”页中显示。
         channel_number_label = Label('通道号')
@@ -652,17 +681,44 @@ class MainWindow(QMainWindow):
         image_controls_hbox.addWidget(image_apply_button)
         image_controls_hbox.addStretch(1)
 
+        speed_ruler_controls_hbox = QHBoxLayout()
+        self.speed_ruler_spacing_spin_box = QDoubleSpinBox()
+        self.speed_ruler_spacing_spin_box.setRange(0.001, 1_000_000.0)
+        self.speed_ruler_spacing_spin_box.setDecimals(3)
+        self.speed_ruler_spacing_spin_box.setSingleStep(0.1)
+        self.speed_ruler_spacing_spin_box.setSuffix(' m')
+        self.speed_ruler_spacing_spin_box.setValue(self.speed_ruler_channel_spacing)
+        self.speed_ruler_spacing_spin_box.setKeyboardTracking(False)
+        self.speed_ruler_spacing_spin_box.setToolTip('真实相邻通道距离 dx；不能使用 gauge length')
+        self.speed_ruler_spacing_spin_box.valueChanged.connect(self.updateSpeedRulerChannelSpacing)
+        self.speed_ruler_reset_button = PushButton('添加速度标尺')
+        self.speed_ruler_reset_button.setEnabled(False)
+        self.speed_ruler_reset_button.setToolTip('在当前灰度图范围内添加或重置可拖动的速度测量线')
+        self.speed_ruler_reset_button.clicked.connect(self.addOrResetSpeedRuler)
+        self.speed_ruler_remove_button = PushButton('移除速度标尺')
+        self.speed_ruler_remove_button.setEnabled(False)
+        self.speed_ruler_remove_button.clicked.connect(self.removeSpeedRuler)
+        self.speed_ruler_status_label = Label('速度标尺未添加')
+        self.speed_ruler_status_label.setStyleSheet('color: #555;')
+        self.speed_ruler_status_label.setWordWrap(True)
+        speed_ruler_controls_hbox.addWidget(Label('车辆速度标尺  dx'))
+        speed_ruler_controls_hbox.addWidget(self.speed_ruler_spacing_spin_box)
+        speed_ruler_controls_hbox.addWidget(self.speed_ruler_reset_button)
+        speed_ruler_controls_hbox.addWidget(self.speed_ruler_remove_button)
+        speed_ruler_controls_hbox.addWidget(self.speed_ruler_status_label, 1)
+
         # 绘制灰度图
         self.plot_gray_scale_widget = MyPlotWidget(
             '灰度图', '推算时间', '通道', check_mouse=False, time_axis=True
         )
-        gray_scale_container = QWidget()
+        self.gray_scale_container = QWidget()
         gray_scale_vbox = QVBoxLayout()
         gray_scale_vbox.setContentsMargins(6, 6, 6, 6)
         gray_scale_vbox.setSpacing(6)
         gray_scale_vbox.addLayout(image_controls_hbox)
+        gray_scale_vbox.addLayout(speed_ruler_controls_hbox)
         gray_scale_vbox.addWidget(self.plot_gray_scale_widget)
-        gray_scale_container.setLayout(gray_scale_vbox)
+        self.gray_scale_container.setLayout(gray_scale_vbox)
 
         # 绘制单通道相位差-时间图
         self.plot_single_channel_time_widget = MyPlotWidget(
@@ -685,7 +741,7 @@ class MainWindow(QMainWindow):
         self.tab_widget.setMovable(True)  # 设置tab可移动
         self.tab_widget.setTabsClosable(True)  # 设置tab可关闭
         self.tab_widget.tabCloseRequested[int].connect(self.removeTab)
-        self.tab_widget.addTab(gray_scale_container, '灰度图')
+        self.tab_widget.addTab(self.gray_scale_container, '灰度图')
         self.tab_widget.addTab(combine_image_widget, '单通道')
         self.initMultiWavesTab()
         self.tab_widget.addTab(self.multi_waves_container, '多通道云图')
@@ -731,9 +787,23 @@ class MainWindow(QMainWindow):
         main_window_vbox.addWidget(self.event_range_widget)
         main_window_vbox.addWidget(self.tab_widget)
 
-        file_area_widget = QWidget()
-        file_area_widget.setMinimumWidth(280)
-        file_area_widget.setLayout(file_area_vbox)
+        self.data_sidebar_widget = QWidget()
+        self.data_sidebar_widget.setLayout(file_area_vbox)
+
+        self.filter_sidebar_widget = QWidget()
+        self.filter_sidebar_layout = QVBoxLayout(self.filter_sidebar_widget)
+        self.filter_sidebar_layout.setContentsMargins(0, 0, 0, 0)
+        self.filter_sidebar_placeholder = Label('请先导入 DAS 数据，再打开二维滤波页。')
+        self.filter_sidebar_placeholder.setAlignment(Qt.AlignCenter)
+        self.filter_sidebar_placeholder.setWordWrap(True)
+        self.filter_sidebar_placeholder.setStyleSheet('color: #666; padding: 16px;')
+        self.filter_sidebar_layout.addWidget(self.filter_sidebar_placeholder)
+
+        self.sidebar_tabs = QTabWidget()
+        self.sidebar_tabs.setMinimumWidth(360)
+        self.sidebar_tabs.addTab(self.data_sidebar_widget, '数据')
+        self.sidebar_tabs.addTab(self.filter_sidebar_widget, '二维滤波')
+        self.sidebar_tabs.currentChanged.connect(self._sidebarTabChanged)
 
         content_widget = QWidget()
         content_widget.setMinimumWidth(500)
@@ -742,11 +812,11 @@ class MainWindow(QMainWindow):
         self.main_splitter = QSplitter(Qt.Horizontal)
         self.main_splitter.setChildrenCollapsible(False)
         self.main_splitter.setHandleWidth(8)
-        self.main_splitter.addWidget(file_area_widget)
+        self.main_splitter.addWidget(self.sidebar_tabs)
         self.main_splitter.addWidget(content_widget)
         self.main_splitter.setStretchFactor(0, 0)
         self.main_splitter.setStretchFactor(1, 1)
-        self.main_splitter.setSizes([300, 1000])
+        self.main_splitter.setSizes([390, 1000])
 
         main_window_hbox.addWidget(self.main_splitter)
         main_window_widget.setLayout(main_window_hbox)
@@ -973,6 +1043,7 @@ class MainWindow(QMainWindow):
         Returns:
 
         """
+        self.speed_ruler_roi = None
         self.plot_gray_scale_widget.clear()
         self.plot_gray_scale_widget.setTimeOrigin(
             self.data_timeline.start_time if self.data_timeline is not None else None
@@ -987,6 +1058,7 @@ class MainWindow(QMainWindow):
         self.drawFileBoundaries(self.plot_gray_scale_widget, 0, self.current_channels)
         self.drawVehicleTrajectories()
         self.drawEventRange(self.plot_gray_scale_widget)
+        self.drawSpeedRuler()
 
     def drawFileBoundaries(self, plot_widget, y_min: float, y_max: float):
         """Draw one clickable source strip per file plus dashed seam lines."""
@@ -1318,7 +1390,7 @@ class MainWindow(QMainWindow):
         return f'{prefix} {value.strftime("%H:%M:%S.%f")[:-3]}'
 
     def drawEventRange(self, plot_widget):
-        """Draw two synchronized draggable time markers and their shaded interval."""
+        """Draw two synchronized draggable time markers without obscuring the data."""
 
         if self.data_timeline is None or not hasattr(self, 'event_range_start_sample'):
             plot_widget._event_range_visual = None
@@ -1328,19 +1400,19 @@ class MainWindow(QMainWindow):
         region = pg.LinearRegionItem(
             values=(start_seconds, end_seconds),
             orientation=pg.LinearRegionItem.Vertical,
-            brush=pg.mkBrush(14, 165, 233, 28),
-            hoverBrush=pg.mkBrush(14, 165, 233, 44),
+            brush=pg.mkBrush(0, 0, 0, 0),
+            hoverBrush=pg.mkBrush(0, 0, 0, 0),
             movable=True,
             bounds=(0.0, self.sampling_times / self.sampling_rate),
             swapMode='sort',
         )
         region.setZValue(16)
-        start_pen = pg.mkPen('#16a34a', width=2)
-        end_pen = pg.mkPen('#dc2626', width=2)
+        start_pen = pg.mkPen('#16a34a', width=3)
+        end_pen = pg.mkPen('#dc2626', width=3)
         region.lines[0].setPen(start_pen)
-        region.lines[0].setHoverPen(pg.mkPen('#15803d', width=3))
+        region.lines[0].setHoverPen(pg.mkPen('#4ade80', width=5))
         region.lines[1].setPen(end_pen)
-        region.lines[1].setHoverPen(pg.mkPen('#b91c1c', width=3))
+        region.lines[1].setHoverPen(pg.mkPen('#fb7185', width=5))
         start_label = pg.InfLineLabel(
             region.lines[0],
             text=self._eventLineText(self.event_range_start_sample, '开始'),
@@ -1401,6 +1473,7 @@ class MainWindow(QMainWindow):
         self.sampling_times_to_num = self.event_range_end_sample
         self.updateDataRange()
         self.updateDataParams()
+        self.updateDataGPSTime()
         self.updateImages()
         self.syncDASFilterVisibleRange()
 
@@ -1412,6 +1485,7 @@ class MainWindow(QMainWindow):
         self.sampling_times_to_num = self.sampling_times
         self.updateDataRange()
         self.updateDataParams()
+        self.updateDataGPSTime()
         self.updateImages()
         self.syncDASFilterVisibleRange()
 
@@ -1481,6 +1555,115 @@ class MainWindow(QMainWindow):
             label = pg.TextItem(str(trajectory.identifier), color=color, anchor=(0, 1))
             label.setPos(float(times[visible][0]), float(local_channels[0]))
             self.plot_gray_scale_widget.addItem(label)
+
+    def defaultSpeedRulerPoints(self):
+        """Return a visible diagonal in full-data time/global-channel coordinates."""
+
+        start_time = (self.sampling_times_from_num - 1) / self.sampling_rate
+        end_time = self.sampling_times_to_num / self.sampling_rate
+        time_span = max(end_time - start_time, 1 / self.sampling_rate)
+        channel_span = max(float(self.channel_to_num - self.channel_from_num), 0.0)
+        elapsed = time_span * 0.5
+        channel_delta = min(
+            channel_span * 0.5,
+            20.0 * elapsed / self.speed_ruler_channel_spacing,
+        )
+        if 0 < channel_delta < 20.0 * elapsed / self.speed_ruler_channel_spacing:
+            elapsed = channel_delta * self.speed_ruler_channel_spacing / 20.0
+        return (
+            (start_time + time_span * 0.25, self.channel_from_num + channel_span * 0.25),
+            (
+                start_time + time_span * 0.25 + elapsed,
+                self.channel_from_num + channel_span * 0.25 + channel_delta,
+            ),
+        )
+
+    def addOrResetSpeedRuler(self):
+        """Add one speed ruler, or reset the existing ruler into the current view."""
+
+        if not hasattr(self, 'data') or self.data.size == 0:
+            printError('请先导入 DAS 数据')
+            return
+        self.speed_ruler_active = True
+        self.speed_ruler_points = self.defaultSpeedRulerPoints()
+        self._removeSpeedRulerGraphics()
+        self.drawSpeedRuler()
+        self.tab_widget.setCurrentWidget(self.gray_scale_container)
+        self.updateSpeedRulerButtons()
+
+    def removeSpeedRuler(self):
+        """Remove only the manual overlay; never modify DAS or trajectory data."""
+
+        self.speed_ruler_active = False
+        self.speed_ruler_points = None
+        self._removeSpeedRulerGraphics()
+        self.speed_ruler_status_label.setText('速度标尺未添加')
+        self.updateSpeedRulerButtons()
+
+    def _removeSpeedRulerGraphics(self):
+        ruler = self.speed_ruler_roi
+        self.speed_ruler_roi = None
+        if ruler is None:
+            return
+        try:
+            self.plot_gray_scale_widget.removeItem(ruler)
+        except RuntimeError:
+            pass
+
+    def drawSpeedRuler(self):
+        """Recreate the ruler after plot refresh using stored full-data coordinates."""
+
+        if not self.speed_ruler_active or not hasattr(self, 'data') or self.data.size == 0:
+            return
+        if self.speed_ruler_points is None:
+            self.speed_ruler_points = self.defaultSpeedRulerPoints()
+        local_points = [
+            (time_value, channel - self.channel_from_num + 0.5)
+            for time_value, channel in self.speed_ruler_points
+        ]
+        ruler = SpeedRulerROI(local_points, self.speed_ruler_channel_spacing)
+        self.speed_ruler_roi = ruler
+        ruler.sigRegionChanged.connect(self.speedRulerMoved)
+        self.plot_gray_scale_widget.addItem(ruler)
+        self.speedRulerMoved(ruler)
+        self.updateSpeedRulerButtons()
+
+    def speedRulerMoved(self, ruler):
+        """Persist ruler endpoints and update speed text during dragging/rotation."""
+
+        if ruler is not self.speed_ruler_roi:
+            return
+        parent_points = ruler.parentPoints()
+        self.speed_ruler_points = tuple(
+            (time_value, local_channel + self.channel_from_num - 0.5)
+            for time_value, local_channel in parent_points
+        )
+        measurement = calculate_projected_speed(
+            self.speed_ruler_points[0],
+            self.speed_ruler_points[1],
+            self.speed_ruler_channel_spacing,
+        )
+        self.speed_ruler_status_label.setText(
+            format_speed_measurement(measurement).replace('\n', '  |  ')
+        )
+
+    def updateSpeedRulerChannelSpacing(self, value: float):
+        """Recalculate the active ruler when the real adjacent-channel spacing changes."""
+
+        self.speed_ruler_channel_spacing = float(value)
+        if self.speed_ruler_roi is not None:
+            self.speed_ruler_roi.setChannelSpacing(self.speed_ruler_channel_spacing)
+            self.speedRulerMoved(self.speed_ruler_roi)
+
+    def updateSpeedRulerButtons(self):
+        if not hasattr(self, 'speed_ruler_reset_button'):
+            return
+        has_data = hasattr(self, 'data') and self.data.size > 0
+        self.speed_ruler_reset_button.setEnabled(has_data)
+        self.speed_ruler_reset_button.setText(
+            '重置速度标尺' if self.speed_ruler_active else '添加速度标尺'
+        )
+        self.speed_ruler_remove_button.setEnabled(self.speed_ruler_active)
 
     def updateImageColorParams(self, *args):
         self.image_colormap = self.image_colormap_combx.currentText()
@@ -1619,24 +1802,86 @@ class MainWindow(QMainWindow):
 
     def selectDataFromTable(self):
         """
-        当从文件列表中选择文件时更新图像等
+        确认后按文件表顺序一次性读取、拼接并更新所选文件。
         Returns:
 
         """
         if self.das_filter_dialog is not None and self.das_filter_dialog.is_busy():
             printError('滤波链正在计算，请等待完成后再切换文件')
             return
-        self.file_names = []
-        item_index = self.files_table_widget.currentIndex().row()  # 获取当前点击的文件行索引
-        for i in range(self.files_read_number):
-            if item_index + i + 1 > self.files_table_widget.rowCount():  # 如果读取文件数大于该文件下面剩余的文件数就只读到最后一个文件
-                break
-            self.file_names.append(self.files_table_widget.item(item_index + i, 0).text())
+        rows = self.selectedFileRows()
+        if not rows:
+            printError('请先在文件表中选择要加载和拼接的文件')
+            return
 
-        self.readData()
-        self.initLocalParams()
-        self.updateAll()
-        self.syncDASFilterDialog()
+        self.file_names = [self.files_table_widget.item(row, 0).text() for row in rows]
+        self.load_selected_files_button.setEnabled(False)
+        self.load_selected_files_button.setText('正在加载…')
+        self.statusBar().showMessage(f'正在读取并拼接 {len(self.file_names)} 个文件…')
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        QApplication.processEvents()
+        try:
+            self.readData()
+            self.initLocalParams()
+            self.updateAll()
+            self.syncDASFilterDialog()
+            self.statusBar().showMessage(
+                f'已加载并拼接 {len(self.data_group.segments)} 个文件。',
+                8000,
+            )
+        except Exception as err:
+            printError(err)
+            self.statusBar().showMessage(f'文件加载失败：{err}', 10000)
+        finally:
+            QApplication.restoreOverrideCursor()
+            self.load_selected_files_button.setText('确定加载并拼接')
+            self.updatePendingFileSelection()
+
+    def selectedFileRows(self):
+        """Return selected directory-table rows in the visible file order."""
+
+        selection_model = self.files_table_widget.selectionModel()
+        if selection_model is None:
+            return []
+        return sorted({index.row() for index in selection_model.selectedRows(0)})
+
+    def selectedFilePaths(self):
+        """Return normalized absolute paths for the pending table selection."""
+
+        paths = []
+        for row in self.selectedFileRows():
+            item = self.files_table_widget.item(row, 0)
+            if item is not None:
+                paths.append(os.path.normcase(os.path.realpath(os.path.join(self.file_path, item.text()))))
+        return paths
+
+    def updatePendingFileSelection(self):
+        """Update only the pending-selection summary; never read data or redraw plots."""
+
+        if not hasattr(self, 'pending_file_selection_label'):
+            return
+        rows = self.selectedFileRows()
+        if not rows:
+            self.pending_file_selection_label.setText('待拼接：请选择文件')
+            self.load_selected_files_button.setEnabled(False)
+            return
+
+        items = [self.files_table_widget.item(row, 0) for row in rows]
+        names = [item.text() for item in items if item is not None]
+        loaded_paths = [] if self.data_group is None else [
+            os.path.normcase(os.path.realpath(segment.path))
+            for segment in self.data_group.segments
+        ]
+        matches_loaded = bool(names) and self.selectedFilePaths() == loaded_paths
+        if matches_loaded:
+            self.pending_file_selection_label.setText(f'当前已加载：{len(names)} 个文件')
+        elif len(names) == 1:
+            self.pending_file_selection_label.setText(f'待加载：{names[0]}')
+        else:
+            self.pending_file_selection_label.setText(
+                f'待拼接：{len(names)} 个文件（{names[0]} → {names[-1]}）'
+            )
+        self.load_selected_files_button.setEnabled(not matches_loaded)
 
     def changeChannelNumber(self):
         """
@@ -1662,6 +1907,7 @@ class MainWindow(QMainWindow):
         self.analysis_menu.setEnabled(True)
         self.das_filter_action.setEnabled(True)
         self.reset_das_filter_action.setEnabled(bool(self._das_filter_steps))
+        self.updateSpeedRulerButtons()
 
         setPicture(self.player_play_button, play_jpg, 'play.jpg')
         self.player_play_button.setDisabled(False)
@@ -1679,12 +1925,17 @@ class MainWindow(QMainWindow):
             (f for f in os.listdir(self.file_path) if f.lower().endswith(DAS_FILE_SUFFIXES)),
             key=natural_sort_key,
         )
-        self.files_table_widget.setRowCount(len(files))  # 有多少个文件就显示多少行
-        for i in range(len(files)):
-            table_widget_item = QTableWidgetItem(files[i])
-            table_widget_item.setToolTip(os.path.abspath(os.path.join(self.file_path, files[i])))
-            self.files_table_widget.setItem(i, 0, table_widget_item)
-        self.highlightLoadedFiles()
+        signals_were_blocked = self.files_table_widget.blockSignals(True)
+        try:
+            self.files_table_widget.setRowCount(len(files))  # 有多少个文件就显示多少行
+            for i in range(len(files)):
+                table_widget_item = QTableWidgetItem(files[i])
+                table_widget_item.setToolTip(os.path.abspath(os.path.join(self.file_path, files[i])))
+                self.files_table_widget.setItem(i, 0, table_widget_item)
+            self.highlightLoadedFiles()
+        finally:
+            self.files_table_widget.blockSignals(signals_were_blocked)
+        self.updatePendingFileSelection()
 
     def highlightLoadedFiles(self):
         """Highlight every directory-table row represented by the loaded data group."""
@@ -1734,7 +1985,7 @@ class MainWindow(QMainWindow):
         self.current_channels_line_edit.setText(str(self.current_channels))
 
     def updateDataGPSTime(self):
-        """Update corrected inferred times without claiming GPS/UTC semantics."""
+        """Update corrected inferred times for the current visible sample range."""
 
         if self.data_timeline is None:
             self.gps_from_line_edit.clear()
@@ -1742,8 +1993,15 @@ class MainWindow(QMainWindow):
             self.time_correction_line_edit.setText(f'{self.time_correction_seconds:+.3f} s')
             self.setEventRangeControlsEnabled(False)
             return
-        self.gps_from_line_edit.setText(format_wall_time(self.data_timeline.start_time))
-        self.gps_to_line_edit.setText(format_wall_time(self.data_timeline.end_time))
+        start_sample = 0
+        end_sample = self.data_timeline.total_samples
+        if hasattr(self, 'sampling_times_from_num') and hasattr(self, 'sampling_times_to_num'):
+            start_sample = self.sampling_times_from_num - 1
+            end_sample = self.sampling_times_to_num
+        visible_start = self.data_timeline.absolute_time_for_sample(start_sample)
+        visible_end = self.data_timeline.absolute_time_for_sample(end_sample)
+        self.gps_from_line_edit.setText(format_wall_time(visible_start))
+        self.gps_to_line_edit.setText(format_wall_time(visible_end))
         self.time_correction_line_edit.setText(
             f'{self.time_correction_seconds:+.3f} s（记录时间 + 修正）'
         )
@@ -2006,6 +2264,7 @@ class MainWindow(QMainWindow):
         self._vehicle_tracking_settings = None
         self.vehicle_trajectories = []
         self._hide_vehicle_trajectories = False
+        self.speed_ruler_points = None
         self.sampling_rate = sampling_rate
         self.channels_num = channels_num
         self.sampling_times = self.data.shape[1]
@@ -2172,6 +2431,7 @@ class MainWindow(QMainWindow):
         btn.clicked.connect(self.setTimeRange)
         btn.clicked.connect(self.updateDataRange)
         btn.clicked.connect(self.updateDataParams)
+        btn.clicked.connect(self.updateDataGPSTime)
         btn.clicked.connect(self.updateImages)
         btn.clicked.connect(dialog.close)
 
@@ -2307,45 +2567,6 @@ class MainWindow(QMainWindow):
         self.channel_number_step = int(self.channel_number_step_line_edit.text())
 
         self.channel_number_spinbx.setSingleStep(self.channel_number_step)
-
-    def changeFilesReadNumberDialog(self):
-        """
-        从表格选择文件时读取的文件数
-        Returns:
-
-        """
-        dialog = Dialog()
-        dialog.setFixedWidth(400)
-        dialog.setWindowTitle('设置文件读取数量')
-
-        files_read_number_label = Label('文件读取数量')
-        self.files_read_number_line_edit = LineEditWithReg()
-        self.files_read_number_line_edit.setToolTip('设置从表格选中文件时的读取数量，从选中的文件开始算起')
-        self.files_read_number_line_edit.setText(str(self.files_read_number))
-
-        btn = PushButton('确定')
-        btn.clicked.connect(self.updateFilesReadNumber)
-        btn.clicked.connect(self.updateImages)
-        btn.clicked.connect(dialog.close)
-
-        vbox = QVBoxLayout()
-        hbox = QHBoxLayout()
-        hbox.addWidget(files_read_number_label)
-        hbox.addWidget(self.files_read_number_line_edit)
-        vbox.addLayout(hbox)
-        vbox.addSpacing(5)
-        vbox.addWidget(btn)
-
-        dialog.setLayout(vbox)
-        dialog.exec_()
-
-    def updateFilesReadNumber(self):
-        """
-        更新读取文件数量
-        Returns:
-
-        """
-        self.files_read_number = int(self.files_read_number_line_edit.text())
 
     # """------------------------------------------------------------------------------------------------------------"""
     """绘制热力图调用函数"""
@@ -2724,7 +2945,7 @@ class MainWindow(QMainWindow):
             self.updateImages()
 
     def showDASFilterDialog(self):
-        """Show the persistent non-modal two-dimensional filter tool."""
+        """Select the persistent two-dimensional filter panel in the left sidebar."""
         if self.raw_data is None or not hasattr(self, 'origin_data'):
             printError('请先导入 DAS 数据')
             return
@@ -2737,9 +2958,8 @@ class MainWindow(QMainWindow):
         )
         if self.das_filter_dialog is not None:
             self.das_filter_dialog.set_visible_range(visible_range)
-            self.das_filter_dialog.show()
-            self.das_filter_dialog.raise_()
-            self.das_filter_dialog.activateWindow()
+            self.das_filter_dialog.set_saved_pipelines(self._filter_pipeline_history)
+            self.sidebar_tabs.setCurrentWidget(self.filter_sidebar_widget)
             return
 
         dialog = DASFilterDialog(
@@ -2752,17 +2972,38 @@ class MainWindow(QMainWindow):
             segment_ranges=self.data_group.segment_ranges if self.data_group else None,
             previous_steps=self._last_das_filter_steps,
             auto_reapply=self.auto_reapply_filter_pipeline,
-            parent=self,
+            embedded=True,
+            parent=self.filter_sidebar_widget,
         )
         self.das_filter_dialog = dialog
+        self.filter_sidebar_placeholder.hide()
+        self.filter_sidebar_layout.addWidget(dialog)
         dialog.previewReady.connect(self.previewDASFilterData)
         dialog.committed.connect(self.commitDASFilterData)
         dialog.pipelineChanged.connect(self.setDASFilterPipeline)
         dialog.settingsChanged.connect(self.setDASFilterSettings)
         dialog.autoReapplyChanged.connect(self.setAutoReapplyFilter)
+        dialog.pipelineConfirmedByUser.connect(self.rememberConfirmedFilterPipeline)
+        dialog.savePipelineRequested.connect(self.saveCurrentFilterPipeline)
+        dialog.loadPipelineRequested.connect(self.loadSavedFilterPipeline)
+        dialog.deletePipelineRequested.connect(self.deleteSavedFilterPipeline)
+        dialog.backRequested.connect(
+            lambda: self.sidebar_tabs.setCurrentWidget(self.data_sidebar_widget)
+        )
+        dialog.set_saved_pipelines(self._filter_pipeline_history)
         dialog.show()
-        dialog.raise_()
-        dialog.activateWindow()
+        self.sidebar_tabs.setCurrentWidget(self.filter_sidebar_widget)
+
+    def _sidebarTabChanged(self, index: int):
+        """Lazily initialize filtering when the user clicks the sidebar tab."""
+
+        if self.sidebar_tabs.widget(index) is not self.filter_sidebar_widget:
+            return
+        if self.raw_data is None or not hasattr(self, 'origin_data'):
+            self.filter_sidebar_placeholder.setText('请先在“数据”页导入 DAS 数据。')
+            return
+        if self.das_filter_dialog is None:
+            QTimer.singleShot(0, self.showDASFilterDialog)
 
     def syncDASFilterDialog(self):
         """Retarget an existing tool window after a successful data switch."""
@@ -2815,34 +3056,133 @@ class MainWindow(QMainWindow):
         if self.das_filter_dialog is not None:
             self.das_filter_dialog.setAutoReapply(self.auto_reapply_filter_pipeline)
 
-    def adaptPreviousFilterSteps(self):
-        """Retarget full-data steps and strictly validate custom ranges for new data."""
+    def _persistFilterPipelineHistory(self):
+        self._filter_pipeline_history = normalize_history(self._filter_pipeline_history)
+        self.preferences.set_filter_pipeline_history(self._filter_pipeline_history)
+        if self.das_filter_dialog is not None:
+            self.das_filter_dialog.set_saved_pipelines(self._filter_pipeline_history)
 
-        if not self._last_das_filter_steps:
-            return []
+    def saveCurrentFilterPipeline(self, name: str):
+        """Save the visible working chain as a named cross-restart scheme."""
+
+        if self.das_filter_dialog is None or self.raw_data is None:
+            return
+        steps = self.das_filter_dialog.pipeline_steps()
+        try:
+            entry = make_history_entry(
+                name,
+                'named',
+                steps,
+                self.raw_data.shape,
+                self.sampling_rate,
+            )
+            self._filter_pipeline_history = upsert_named_history(
+                self._filter_pipeline_history,
+                entry,
+            )
+        except ValueError as error:
+            QMessageBox.warning(self, '无法保存滤波方案', str(error))
+            return
+        self._persistFilterPipelineHistory()
+        self.statusBar().showMessage(f'已保存滤波方案“{name}”，下次启动仍可载入。', 8000)
+
+    def rememberConfirmedFilterPipeline(self, steps):
+        """Store a deduplicated recent entry only after explicit user confirmation."""
+
+        if self.raw_data is None or not steps:
+            return
+        name = datetime.now().strftime('最近使用 %m-%d %H:%M:%S')
+        try:
+            entry = make_history_entry(
+                name,
+                'recent',
+                steps,
+                self.raw_data.shape,
+                self.sampling_rate,
+            )
+            self._filter_pipeline_history = add_recent_history(
+                self._filter_pipeline_history,
+                entry,
+            )
+        except ValueError as error:
+            self.statusBar().showMessage(f'滤波链历史未保存：{error}', 8000)
+            return
+        self._persistFilterPipelineHistory()
+
+    def deleteSavedFilterPipeline(self, identifier: str):
+        previous_count = len(self._filter_pipeline_history)
+        self._filter_pipeline_history = [
+            entry for entry in self._filter_pipeline_history
+            if str(entry.get('identifier')) != str(identifier)
+        ]
+        if len(self._filter_pipeline_history) == previous_count:
+            return
+        self._persistFilterPipelineHistory()
+        self.statusBar().showMessage('已删除保存的滤波方案。', 5000)
+
+    def _historyEntry(self, identifier: str):
+        return next((
+            entry for entry in self._filter_pipeline_history
+            if str(entry.get('identifier')) == str(identifier)
+        ), None)
+
+    def loadSavedFilterPipeline(self, identifier: str):
+        """Validate and preview a saved chain without automatically committing it."""
+
+        if self.raw_data is None or self.das_filter_dialog is None:
+            return
+        entry = self._historyEntry(identifier)
+        if entry is None:
+            QMessageBox.warning(self, '无法载入滤波方案', '找不到所选滤波方案。')
+            return
+        try:
+            steps = history_entry_steps(entry)
+            adapted = self.adaptFilterStepsToCurrentData(
+                steps,
+                entry.get('source_shape'),
+            )
+            self.validateFilterStepsForCurrentData(adapted)
+        except (TypeError, ValueError) as error:
+            QMessageBox.warning(self, '滤波方案与当前数据不兼容', str(error))
+            return
+        if self.das_filter_dialog.replayExternalPipeline(
+            adapted,
+            f'载入保存方案“{entry.get("name", "")}”',
+            commit_after=False,
+        ):
+            self.statusBar().showMessage(
+                f'正在载入并预览滤波方案“{entry.get("name", "")}”；确认前可撤销。',
+                8000,
+            )
+
+    def adaptFilterStepsToCurrentData(self, steps, source_shape):
+        """Adapt only source-wide bounds; keep custom ranges strict."""
+
         if self.raw_data is None:
             raise ValueError('当前没有可处理的新数据')
         new_channels, new_samples = map(int, self.raw_data.shape)
-        if self._last_das_filter_shape is None:
-            old_channels, old_samples = new_channels, new_samples
-        else:
-            old_channels, old_samples = map(int, self._last_das_filter_shape)
+        try:
+            old_channels, old_samples = map(int, source_shape)
+        except (TypeError, ValueError):
+            raise ValueError('保存的滤波方案缺少有效的源数据尺寸')
+        if min(old_channels, old_samples) <= 0:
+            raise ValueError('保存的滤波方案源数据尺寸无效')
         adapted = []
-        for step in self._last_das_filter_steps:
+        for step in steps:
             channel_from, channel_to, sample_from, sample_to = step.selection
             if channel_from == 1 and channel_to == old_channels:
                 channel_to = new_channels
             elif channel_to > new_channels:
                 raise ValueError(
                     f'步骤“{step.label}”的通道范围 {channel_from}-{channel_to} '
-                    f'超出新数据 1-{new_channels}'
+                    f'超出当前数据 1-{new_channels}'
                 )
             if sample_from == 1 and sample_to == old_samples:
                 sample_to = new_samples
             elif sample_to > new_samples:
                 raise ValueError(
                     f'步骤“{step.label}”的采样范围 {sample_from}-{sample_to} '
-                    f'超出新数据 1-{new_samples}'
+                    f'超出当前数据 1-{new_samples}'
                 )
             adapted.append(FilterStep(
                 algorithm=step.algorithm,
@@ -2853,6 +3193,57 @@ class MainWindow(QMainWindow):
                 processing_mode=step.processing_mode,
             ))
         return adapted
+
+    def validateFilterStepsForCurrentData(self, steps):
+        """Reject incompatible saved frequencies before starting a worker."""
+
+        nyquist = self.sampling_rate / 2.0
+        supported_algorithms = {algorithm for algorithm, _label in ALGORITHM_LABELS}
+        for step in steps:
+            if step.algorithm not in supported_algorithms:
+                raise ValueError(
+                    f'步骤“{step.label}”使用了未知滤波算法：{step.algorithm}'
+                )
+            parameters = step.parameters
+            if step.algorithm in {'bandpass', 'bandstop'}:
+                low = float(parameters.get('frequency_low', 0.0))
+                high = float(parameters.get('frequency_high', 0.0))
+                if not 0 < low < high < nyquist:
+                    raise ValueError(
+                        f'步骤“{step.label}”的频率 {low:g}-{high:g} Hz '
+                        f'不适用于当前采样率 {self.sampling_rate:g} Hz'
+                    )
+            elif step.algorithm in {'lowpass', 'highpass'}:
+                frequency = float(parameters.get('frequency', 0.0))
+                if not 0 < frequency < nyquist:
+                    raise ValueError(
+                        f'步骤“{step.label}”的截止频率 {frequency:g} Hz '
+                        f'不适用于当前采样率 {self.sampling_rate:g} Hz'
+                    )
+            elif step.algorithm == 'fk':
+                high = float(parameters.get('fk_frequency_high', 0.0))
+                spacing = float(parameters.get('channel_spacing', 0.0))
+                if high and not 0 < high < nyquist:
+                    raise ValueError(
+                        f'步骤“{step.label}”的 F-K 频率上限 {high:g} Hz '
+                        f'不适用于当前采样率 {self.sampling_rate:g} Hz'
+                    )
+                if spacing <= 0:
+                    raise ValueError(f'步骤“{step.label}”的相邻通道距离 dx 必须大于 0')
+
+    def adaptPreviousFilterSteps(self):
+        """Retarget full-data steps and strictly validate custom ranges for new data."""
+
+        if not self._last_das_filter_steps:
+            return []
+        if self._last_das_filter_shape is None:
+            source_shape = self.raw_data.shape if self.raw_data is not None else (0, 0)
+        else:
+            source_shape = self._last_das_filter_shape
+        return self.adaptFilterStepsToCurrentData(
+            self._last_das_filter_steps,
+            source_shape,
+        )
 
     def syncDASFilterVisibleRange(self):
         if self.das_filter_dialog is None or self.das_filter_dialog.is_busy():

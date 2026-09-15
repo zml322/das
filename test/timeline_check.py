@@ -76,6 +76,11 @@ class TimelineChecks(unittest.TestCase):
             second = AppPreferences(QSettings(path, QSettings.IniFormat))
             self.assertEqual(second.time_correction_seconds(), 12.5)
             self.assertFalse(second.auto_reapply_filter())
+            history = [{"name": "方案一", "steps": [{"algorithm": "bandpass"}]}]
+            first.set_filter_pipeline_history(history)
+            self.assertEqual(second.filter_pipeline_history(), history)
+            second.settings.setValue(second.FILTER_HISTORY_KEY, "{invalid-json")
+            self.assertEqual(second.filter_pipeline_history(), [])
 
 
 if __name__ == "__main__":

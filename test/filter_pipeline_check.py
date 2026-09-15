@@ -1,17 +1,19 @@
-"""Regression checks for the v2.1.9 filter history and stitched data model."""
+"""Regression checks for the v2.1.14 filter sidebar, history, and stitched data."""
 
 from __future__ import annotations
 
 import os
 import sys
+import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import numpy as np
-from PyQt5.QtCore import QEventLoop, QTimer
-from PyQt5.QtWidgets import QApplication
+from PyQt5.QtCore import QEventLoop, QSettings, QTimer, Qt
+from PyQt5.QtWidgets import QApplication, QMessageBox
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -20,6 +22,14 @@ if str(PROJECT_ROOT) not in sys.path:
 from utils.classes.data_group import DataGroup, natural_sort_key
 from utils.classes.das_filter import DASFilterDialog
 from utils.classes.das_filter import apply_das_filter
+from utils.classes.filter_history import (
+    MAX_RECENT_PIPELINES,
+    add_recent_history,
+    history_entry_steps,
+    make_history_entry,
+    normalize_history,
+    upsert_named_history,
+)
 from utils.classes.filter_pipeline import (
     FilterPipeline,
     FilterStep,
@@ -27,6 +37,7 @@ from utils.classes.filter_pipeline import (
 )
 from utils.mainwindow import MainWindow
 from utils.bin_reader import bin2numpy
+from utils.preferences import AppPreferences
 
 
 def simple_filter(data, _sampling_rate, algorithm, parameters):
@@ -96,6 +107,40 @@ class FilterPipelineChecks(unittest.TestCase):
         pipeline.remove(1)
         self.assertEqual(len(pipeline), 1)
 
+    def test_persistent_filter_history_validates_replaces_and_deduplicates(self):
+        first = FilterStep("bandpass", {"frequency_low": 1.0, "frequency_high": 20.0}, (1, 4, 1, 100), "带通")
+        second = FilterStep("highpass", {"frequency": 2.0}, (1, 4, 1, 100), "高通")
+        named = make_history_entry("车辆方案", "named", [first], (4, 100), 1000)
+        history = upsert_named_history([], named)
+        replacement = make_history_entry("车辆方案", "named", [second], (4, 100), 1000)
+        history = upsert_named_history(history, replacement)
+        self.assertEqual(len(history), 1)
+        self.assertEqual(history_entry_steps(history[0])[0].algorithm, "highpass")
+
+        recent = make_history_entry("最近", "recent", [second], (4, 100), 1000)
+        history = add_recent_history(history, recent)
+        history = add_recent_history(
+            history,
+            make_history_entry("重复", "recent", [second], (4, 100), 1000),
+        )
+        self.assertEqual(len(history), 2)
+        for index in range(MAX_RECENT_PIPELINES + 3):
+            step = FilterStep("highpass", {"frequency": 3.0 + index}, (1, 4, 1, 100), "高通")
+            history = add_recent_history(
+                history,
+                make_history_entry(str(index), "recent", [step], (4, 100), 1000),
+            )
+        self.assertEqual(sum(entry["kind"] == "recent" for entry in history), MAX_RECENT_PIPELINES)
+        self.assertEqual(normalize_history([{}, history[0], history[0]]), [history[0]])
+
+    def test_saved_filter_validation_rejects_unknown_algorithm(self):
+        window = MainWindow()
+        window.sampling_rate = 1000.0
+        unknown = FilterStep("retired_filter", {}, (1, 1, 1, 10), "旧版算法")
+        with self.assertRaisesRegex(ValueError, "未知滤波算法"):
+            window.validateFilterStepsForCurrentData([unknown])
+        window.deleteLater()
+
     def test_non_modal_dialog_replays_and_lists_steps(self):
         raw = np.arange(48, dtype=np.float32).reshape(4, 12)
         dialog = DASFilterDialog(
@@ -106,6 +151,12 @@ class FilterPipelineChecks(unittest.TestCase):
             auto_reapply=False,
         )
         self.assertFalse(dialog.isModal())
+        self.assertEqual(dialog.minimumWidth(), 380)
+        self.assertLessEqual(dialog.width(), 430)
+        self.assertFalse(dialog.scroll_area.horizontalScrollBar().isVisible())
+        self.assertTrue(dialog.channel_from.isHidden())
+        dialog.scope_combo.setCurrentIndex(dialog.scope_combo.findData("custom"))
+        self.assertFalse(dialog.channel_from.isHidden())
         self.assertFalse(dialog.auto_reapply_checkbox.isChecked())
         step = FilterStep("mad_normalize", {}, (2, 3, 2, 10), "各通道 MAD 归一化")
         dialog._start_replay([step], "test", 0)
@@ -148,10 +199,19 @@ class FilterPipelineChecks(unittest.TestCase):
         window.initLocalParams()
         window.updateDataRange()
         window.updateDataParams()
-        window.showDASFilterDialog()
+        window.sidebar_tabs.setCurrentWidget(window.filter_sidebar_widget)
+        QApplication.processEvents()
         dialog = window.das_filter_dialog
+        QApplication.processEvents()
         self.assertIsNotNone(dialog)
         self.assertFalse(dialog.isModal())
+        self.assertTrue(dialog.embedded)
+        self.assertFalse(dialog.isWindow())
+        self.assertIs(window.sidebar_tabs.currentWidget(), window.filter_sidebar_widget)
+        self.assertEqual(dialog.windowFlags() & Qt.WindowType_Mask, Qt.Widget)
+        self.assertEqual(dialog.history_list.horizontalScrollBar().maximum(), 0)
+        self.assertEqual(window.overview_form.verticalSpacing(), 2)
+        self.assertEqual(window.gps_from_line_edit.maximumHeight(), 28)
         window.showDASFilterDialog()
         self.assertIs(window.das_filter_dialog, dialog)
 
@@ -161,8 +221,62 @@ class FilterPipelineChecks(unittest.TestCase):
         self.assertEqual(len(window._das_filter_steps), 1)
         np.testing.assert_array_equal(window.origin_data[0], raw[0])
         self.assertFalse(np.array_equal(window.origin_data[1, 1:100], raw[1, 1:100]))
-        dialog.hide()
-        window.deleteLater()
+        window.show()
+        QApplication.processEvents()
+        with patch("utils.mainwindow.QMessageBox.question", return_value=QMessageBox.Yes):
+            self.assertTrue(window.close())
+        QApplication.processEvents()
+        self.assertFalse(window.isVisible())
+
+    def test_saved_filter_history_survives_restart_and_loads_as_preview(self):
+        with tempfile.TemporaryDirectory(prefix="dasviewer-filter-history-") as directory:
+            settings_path = str(Path(directory) / "settings.ini")
+            preferences = AppPreferences(QSettings(settings_path, QSettings.IniFormat))
+            window = MainWindow(preferences=preferences)
+            raw = np.arange(800, dtype=np.float32).reshape(4, 200)
+            window.raw_data = raw.copy()
+            window.raw_data.setflags(write=False)
+            window.origin_data = raw.copy()
+            window.sampling_rate = 1000.0
+            window.channels_num = 4
+            window.sampling_times = 200
+            window.data_group = DataGroup.from_files(["history.bin"], [200], 4, 1000)
+            window.initLocalParams()
+            window.updateDataRange()
+            window.updateDataParams()
+            window.showDASFilterDialog()
+
+            step = FilterStep("mad_normalize", {}, (1, 4, 1, 200), "各通道 MAD 归一化")
+            window.das_filter_dialog.pipeline = FilterPipeline([step])
+            window.das_filter_dialog._refresh_history()
+            window.saveCurrentFilterPipeline("车辆通用方案")
+
+            restarted = AppPreferences(QSettings(settings_path, QSettings.IniFormat))
+            saved = normalize_history(restarted.filter_pipeline_history())
+            self.assertEqual(len(saved), 1)
+            self.assertEqual(saved[0]["name"], "车辆通用方案")
+            self.assertEqual(saved[0]["kind"], "named")
+
+            window.das_filter_dialog.pipeline = FilterPipeline()
+            window.das_filter_dialog._refresh_history()
+            window.loadSavedFilterPipeline(saved[0]["identifier"])
+            wait_for_dialog(window.das_filter_dialog)
+            self.assertEqual(len(window._das_filter_steps), 1)
+            self.assertEqual(window._das_filter_steps[0].selection, (1, 4, 1, 200))
+            self.assertEqual(window.das_filter_dialog.committed_steps, [])
+
+            window.das_filter_dialog._commit_current()
+            stored = normalize_history(restarted.filter_pipeline_history())
+            self.assertEqual([entry["kind"] for entry in stored], ["named", "recent"])
+            window.das_filter_dialog._commit_current()
+            stored = normalize_history(restarted.filter_pipeline_history())
+            self.assertEqual(len(stored), 2)
+
+            window.deleteSavedFilterPipeline(saved[0]["identifier"])
+            stored = normalize_history(restarted.filter_pipeline_history())
+            self.assertEqual([entry["kind"] for entry in stored], ["recent"])
+            window.das_filter_dialog.hide()
+            window.deleteLater()
 
     def test_stitched_file_identifiers_and_selection(self):
         window = MainWindow()
@@ -229,16 +343,73 @@ class FilterPipelineChecks(unittest.TestCase):
             window.plot_single_channel_time_widget,
             window.plot_multi_waves_widget,
         ):
+            visual = plot_widget._event_range_visual
             self.assertEqual(
-                tuple(plot_widget._event_range_visual["region"].getRegion()),
+                tuple(visual["region"].getRegion()),
                 (0.025, 0.175),
             )
+            self.assertEqual(visual["region"].brush.color().alpha(), 0)
+            self.assertEqual(visual["region"].hoverBrush.color().alpha(), 0)
+            self.assertEqual(visual["region"].lines[0].pen.width(), 3)
+            self.assertEqual(visual["region"].lines[1].pen.width(), 3)
         window.viewEventRange()
         self.assertEqual((window.sampling_times_from_num, window.sampling_times_to_num), (26, 175))
+        self.assertEqual(window.gps_from_line_edit.text(), "2026-08-26 16:54:30.925")
+        self.assertEqual(window.gps_to_line_edit.text(), "2026-08-26 16:54:31.075")
+        self.assertEqual(
+            window.plot_gray_scale_widget.time_axis.tickStrings([0.025, 0.175], 1, 0.05),
+            ["16:54:30.925", "16:54:31.075"],
+        )
         np.testing.assert_array_equal(window.origin_data, baseline)
         window.restoreFullEventRange()
         self.assertEqual((window.sampling_times_from_num, window.sampling_times_to_num), (1, 200))
+        self.assertEqual(window.gps_from_line_edit.text(), "2026-08-26 16:54:30.900")
+        self.assertEqual(window.gps_to_line_edit.text(), "2026-08-26 16:54:31.100")
         window.deleteLater()
+
+    def test_file_table_selection_waits_for_explicit_confirmation(self):
+        with tempfile.TemporaryDirectory(prefix="dasviewer-selection-") as directory:
+            names = ["part1.bin", "part2.bin", "part10.bin"]
+            for name in names:
+                (Path(directory) / name).touch()
+
+            window = MainWindow()
+            window.file_path = directory
+            window.updateFile()
+            calls = []
+
+            def fake_read_data():
+                calls.append(("read", list(window.file_names)))
+                paths = [window.dataFilePath(name) for name in window.file_names]
+                window.data_group = DataGroup.from_files(paths, [1] * len(paths), 1, 1)
+
+            window.readData = fake_read_data
+            window.initLocalParams = lambda: calls.append(("init", None))
+            window.updateAll = lambda: calls.append(("update", None))
+            window.syncDASFilterDialog = lambda: calls.append(("sync", None))
+
+            window.files_table_widget.item(0, 0).setSelected(True)
+            window.files_table_widget.item(2, 0).setSelected(True)
+            QApplication.processEvents()
+
+            self.assertEqual(calls, [])
+            self.assertEqual(window.selectedFileRows(), [0, 2])
+            self.assertIn("待拼接：2 个文件", window.pending_file_selection_label.text())
+            self.assertTrue(window.load_selected_files_button.isEnabled())
+
+            window.load_selected_files_button.click()
+            self.assertEqual(
+                calls,
+                [
+                    ("read", ["part1.bin", "part10.bin"]),
+                    ("init", None),
+                    ("update", None),
+                    ("sync", None),
+                ],
+            )
+            self.assertEqual(window.pending_file_selection_label.text(), "当前已加载：2 个文件")
+            self.assertFalse(window.load_selected_files_button.isEnabled())
+            window.deleteLater()
 
     def test_auto_reapply_adapts_full_range_and_replays_from_new_baseline(self):
         window = MainWindow()
@@ -272,7 +443,7 @@ class FilterPipelineChecks(unittest.TestCase):
             FilterStep("mad_normalize", {}, (1, 4, 50, 350), "局部 MAD")
         ]
         window._last_das_filter_shape = (4, 400)
-        with self.assertRaisesRegex(ValueError, "超出新数据"):
+        with self.assertRaisesRegex(ValueError, "超出当前数据"):
             window.adaptPreviousFilterSteps()
         window.das_filter_dialog.hide()
         window.deleteLater()
@@ -282,9 +453,16 @@ class FilterPipelineChecks(unittest.TestCase):
         self.assertGreaterEqual(len(files), 2)
         window = MainWindow()
         window.time_correction_seconds = 12.0
-        window.file_names = [str(path) for path in files[:2]]
         window.file_path = str(files[0].parent)
-        window.readData()
+        window.updateFile()
+        selected_names = {path.name for path in files[:2]}
+        for row in range(window.files_table_widget.rowCount()):
+            item = window.files_table_widget.item(row, 0)
+            item.setSelected(item.text() in selected_names)
+        QApplication.processEvents()
+        self.assertIsNone(window.raw_data)
+        self.assertTrue(window.load_selected_files_button.isEnabled())
+        window.load_selected_files_button.click()
         self.assertEqual(window.raw_data.shape, (520, 61440))
         self.assertEqual(window.data_group.boundaries, [30720])
         self.assertEqual([segment.sample_count for segment in window.data_group.segments], [30720, 30720])
@@ -306,7 +484,6 @@ class FilterPipelineChecks(unittest.TestCase):
             window.plot_gray_scale_widget.time_axis.tickStrings([0, 30.72], 1, 10),
             ["16:54:00.280", "16:54:31.000"],
         )
-        window.updateFile()
         highlighted = {
             window.files_table_widget.item(row, 0).text()
             for row in range(window.files_table_widget.rowCount())

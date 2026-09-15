@@ -22,13 +22,18 @@ from PyQt5.QtWidgets import (
     QDialog,
     QDoubleSpinBox,
     QFormLayout,
+    QFrame,
+    QGridLayout,
     QGroupBox,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QListWidget,
     QListWidgetItem,
     QMessageBox,
     QPushButton,
+    QScrollArea,
+    QSizePolicy,
     QSpinBox,
     QVBoxLayout,
     QWidget,
@@ -378,6 +383,11 @@ class DASFilterDialog(QDialog):
     pipelineChanged = pyqtSignal(object)
     settingsChanged = pyqtSignal(object)
     autoReapplyChanged = pyqtSignal(bool)
+    pipelineConfirmedByUser = pyqtSignal(object)
+    savePipelineRequested = pyqtSignal(str)
+    loadPipelineRequested = pyqtSignal(str)
+    deletePipelineRequested = pyqtSignal(str)
+    backRequested = pyqtSignal()
 
     def __init__(
         self,
@@ -390,14 +400,22 @@ class DASFilterDialog(QDialog):
         segment_ranges: Optional[Sequence[Tuple[int, int]]] = None,
         previous_steps: Optional[Iterable[FilterStep]] = None,
         auto_reapply: bool = True,
+        embedded: bool = False,
         parent: Optional[QWidget] = None,
     ):
         super().__init__(parent)
+        self.embedded = bool(embedded)
         self.setWindowTitle("DAS 二维滤波工具")
         self.setModal(False)
-        self.setWindowFlag(Qt.Tool, True)
-        self.resize(760, 780)
-        self.setMinimumSize(680, 680)
+        if self.embedded:
+            self.setWindowFlags(Qt.Widget)
+            self.setMinimumSize(0, 0)
+            self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+            self.setStyleSheet('QGroupBox { margin-top: 6px; padding-top: 4px; }')
+        else:
+            self.setWindowFlag(Qt.Tool, True)
+            self.resize(410, 720)
+            self.setMinimumSize(380, 560)
 
         self.raw_data = np.asarray(data, dtype=np.float32).copy()
         if self.raw_data.ndim != 2 or min(self.raw_data.shape) == 0:
@@ -427,6 +445,7 @@ class DASFilterDialog(QDialog):
         self._syncing_range = False
         self._refreshing_history = False
         self._loading_step = False
+        self._ui_busy = False
         self._build_ui()
         self._restore_filter_settings(settings)
         self._refresh_history()
@@ -450,10 +469,30 @@ class DASFilterDialog(QDialog):
 
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
+        margin = 4 if self.embedded else 8
+        root.setContentsMargins(margin, margin, margin, margin)
+        root.setSpacing(4)
+
+        self.scroll_area = QScrollArea()
+        self.scroll_area.setWidgetResizable(True)
+        self.scroll_area.setFrameShape(QFrame.NoFrame)
+        self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll_content = QWidget()
+        content = QVBoxLayout(scroll_content)
+        content.setContentsMargins(0, 0, 0, 0)
+        content.setSpacing(4)
+        content.setAlignment(Qt.AlignTop)
+        self.scroll_area.setWidget(scroll_content)
+        root.addWidget(self.scroll_area, 1)
 
         algorithm_group = QGroupBox("算法")
         algorithm_form = QFormLayout(algorithm_group)
+        algorithm_form.setContentsMargins(6, 4, 6, 4)
+        algorithm_form.setHorizontalSpacing(6)
+        algorithm_form.setVerticalSpacing(2)
         self.algorithm_combo = QComboBox()
+        self.algorithm_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.algorithm_combo.setMinimumContentsLength(12)
         for key, label in ALGORITHM_LABELS:
             self.algorithm_combo.addItem(label, key)
         self.algorithm_combo.currentIndexChanged.connect(self._update_parameter_visibility)
@@ -462,10 +501,15 @@ class DASFilterDialog(QDialog):
         backend_label = QLabel(f"基础滤波后端：{backend}")
         backend_label.setStyleSheet("color: #555;")
         algorithm_form.addRow("", backend_label)
-        root.addWidget(algorithm_group)
+        algorithm_group.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
+        content.addWidget(algorithm_group)
 
         range_group = QGroupBox("处理范围（包含起止点）")
         range_form = QFormLayout(range_group)
+        self.range_form = range_form
+        range_form.setContentsMargins(6, 4, 6, 4)
+        range_form.setHorizontalSpacing(6)
+        range_form.setVerticalSpacing(2)
         self.scope_combo = QComboBox()
         self.scope_combo.addItem("当前查看范围", "visible")
         self.scope_combo.addItem("自定义范围", "custom")
@@ -473,6 +517,8 @@ class DASFilterDialog(QDialog):
         range_form.addRow("作用范围", self.scope_combo)
 
         self.processing_mode_combo = QComboBox()
+        self.processing_mode_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.processing_mode_combo.setMinimumContentsLength(12)
         self.processing_mode_combo.addItem("整体连续处理（跨文件边界）", "continuous")
         self.processing_mode_combo.addItem("按文件分段处理", "per_segment")
         self.processing_mode_combo.setEnabled(len(self.segment_ranges) > 1)
@@ -484,7 +530,8 @@ class DASFilterDialog(QDialog):
         channel_row = QHBoxLayout()
         self.channel_from = self._make_spinbox(1, self.channel_count, self.visible_range[0])
         self.channel_to = self._make_spinbox(1, self.channel_count, self.visible_range[1])
-        channel_row.addWidget(QLabel("通道"))
+        for box in (self.channel_from, self.channel_to):
+            box.setFixedWidth(82)
         channel_row.addWidget(self.channel_from)
         channel_row.addWidget(QLabel("至"))
         channel_row.addWidget(self.channel_to)
@@ -494,7 +541,8 @@ class DASFilterDialog(QDialog):
         sample_row = QHBoxLayout()
         self.sample_from = self._make_spinbox(1, self.sample_count, self.visible_range[2])
         self.sample_to = self._make_spinbox(1, self.sample_count, self.visible_range[3])
-        sample_row.addWidget(QLabel("采样点"))
+        for box in (self.sample_from, self.sample_to):
+            box.setFixedWidth(90)
         sample_row.addWidget(self.sample_from)
         sample_row.addWidget(QLabel("至"))
         sample_row.addWidget(self.sample_to)
@@ -509,7 +557,7 @@ class DASFilterDialog(QDialog):
             box.setRange(0.0, duration)
             box.setDecimals(6)
             box.setSingleStep(0.01)
-        time_row.addWidget(QLabel("时间 (s)"))
+            box.setFixedWidth(104)
         time_row.addWidget(self.time_from)
         time_row.addWidget(QLabel("至"))
         time_row.addWidget(self.time_to)
@@ -525,10 +573,14 @@ class DASFilterDialog(QDialog):
         self.sample_to.valueChanged.connect(self._samples_changed)
         self.time_from.valueChanged.connect(self._times_changed)
         self.time_to.valueChanged.connect(self._times_changed)
-        root.addWidget(range_group)
+        range_group.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
+        content.addWidget(range_group)
 
         parameter_group = QGroupBox("算法参数")
         parameter_form = QFormLayout(parameter_group)
+        parameter_form.setContentsMargins(6, 4, 6, 4)
+        parameter_form.setHorizontalSpacing(6)
+        parameter_form.setVerticalSpacing(2)
 
         self.frequency_low = QDoubleSpinBox()
         self.frequency_high = QDoubleSpinBox()
@@ -537,6 +589,7 @@ class DASFilterDialog(QDialog):
             box.setRange(0.001, max(0.002, nyquist * 0.999))
             box.setDecimals(3)
             box.setSingleStep(1.0)
+            box.setMaximumWidth(150)
         self.frequency_low.setValue(min(5.0, nyquist * 0.1))
         self.frequency_high.setValue(min(120.0, nyquist * 0.8))
         parameter_form.addRow("低频 (Hz)", self.frequency_low)
@@ -547,9 +600,11 @@ class DASFilterDialog(QDialog):
         self.frequency.setDecimals(3)
         self.frequency.setSingleStep(1.0)
         self.frequency.setValue(min(120.0, nyquist * 0.8))
+        self.frequency.setMaximumWidth(150)
         parameter_form.addRow("截止频率 (Hz)", self.frequency)
 
         self.order = self._make_spinbox(1, 12, 4)
+        self.order.setMaximumWidth(150)
         parameter_form.addRow("滤波阶数", self.order)
         self.zero_phase = QCheckBox("启用零相位（前后向滤波）")
         self.zero_phase.setChecked(True)
@@ -561,10 +616,13 @@ class DASFilterDialog(QDialog):
         self.sample_window = self._make_spinbox(
             1, max(1, self.sample_count), min(5, self.sample_count)
         )
+        self.channel_window.setMaximumWidth(150)
+        self.sample_window.setMaximumWidth(150)
         self.threshold = QDoubleSpinBox()
         self.threshold.setRange(1.0, 1000.0)
         self.threshold.setValue(10.0)
         self.threshold.setDecimals(2)
+        self.threshold.setMaximumWidth(150)
         parameter_form.addRow("尖峰通道窗口", self.channel_window)
         parameter_form.addRow("尖峰采样窗口", self.sample_window)
         parameter_form.addRow("尖峰阈值倍数", self.threshold)
@@ -580,6 +638,7 @@ class DASFilterDialog(QDialog):
         self.channel_spacing.setSingleStep(0.1)
         self.channel_spacing.setValue(1.0)
         self.channel_spacing.setSuffix(" m")
+        self.channel_spacing.setMaximumWidth(150)
         parameter_form.addRow("相邻通道距离 dx", self.channel_spacing)
 
         self.fk_mode = QComboBox()
@@ -600,6 +659,7 @@ class DASFilterDialog(QDialog):
             box.setDecimals(3)
             box.setSingleStep(1.0)
             box.setSuffix(" Hz")
+            box.setMaximumWidth(150)
         parameter_form.addRow("F-K 频率下限", self.fk_frequency_low)
         parameter_form.addRow("F-K 频率上限", self.fk_frequency_high)
 
@@ -610,6 +670,7 @@ class DASFilterDialog(QDialog):
             box.setDecimals(1)
             box.setSingleStep(10.0)
             box.setSuffix(" m/s")
+            box.setMaximumWidth(150)
         parameter_form.addRow("表观速度下限", self.fk_velocity_low)
         parameter_form.addRow("表观速度上限", self.fk_velocity_high)
 
@@ -620,40 +681,78 @@ class DASFilterDialog(QDialog):
         self.fk_hint.setWordWrap(True)
         self.fk_hint.setStyleSheet("color: #555;")
         parameter_form.addRow("", self.fk_hint)
-        root.addWidget(parameter_group)
+        parameter_group.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
+        content.addWidget(parameter_group)
 
-        history_group = QGroupBox("已应用滤波链（勾选表示启用）")
+        history_group = QGroupBox("滤波链")
         history_layout = QVBoxLayout(history_group)
+        history_layout.setContentsMargins(6, 4, 6, 4)
+        history_layout.setSpacing(4)
+
+        saved_pipeline_row = QHBoxLayout()
+        saved_pipeline_row.setSpacing(4)
+        saved_pipeline_row.addWidget(QLabel("保存历史"))
+        self.saved_pipeline_combo = QComboBox()
+        self.saved_pipeline_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.saved_pipeline_combo.setMinimumContentsLength(10)
+        self.saved_pipeline_combo.setToolTip("命名方案和最近确认的滤波链会在下次启动时保留")
+        self.saved_pipeline_combo.currentIndexChanged.connect(self._update_saved_pipeline_buttons)
+        saved_pipeline_row.addWidget(self.saved_pipeline_combo, 1)
+        history_layout.addLayout(saved_pipeline_row)
+
+        saved_button_row = QHBoxLayout()
+        saved_button_row.setSpacing(4)
+        self.load_saved_pipeline_button = QPushButton("载入预览")
+        self.save_pipeline_button = QPushButton("保存方案")
+        self.delete_saved_pipeline_button = QPushButton("删除方案")
+        self.load_saved_pipeline_button.clicked.connect(self._request_load_pipeline)
+        self.save_pipeline_button.clicked.connect(self._request_save_pipeline)
+        self.delete_saved_pipeline_button.clicked.connect(self._request_delete_pipeline)
+        for button in (
+            self.load_saved_pipeline_button,
+            self.save_pipeline_button,
+            self.delete_saved_pipeline_button,
+        ):
+            saved_button_row.addWidget(button)
+        history_layout.addLayout(saved_button_row)
+        history_layout.addWidget(QLabel("当前链（勾选表示启用）"))
+
         self.history_list = QListWidget()
-        self.history_list.setMinimumHeight(150)
+        self.history_list.setMinimumHeight(92)
+        self.history_list.setMaximumHeight(120)
         self.history_list.setAlternatingRowColors(True)
+        self.history_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.history_list.setTextElideMode(Qt.ElideRight)
         self.history_list.itemChanged.connect(self._history_item_changed)
         self.history_list.currentRowChanged.connect(self._load_selected_step)
         history_layout.addWidget(self.history_list)
 
-        history_button_row = QHBoxLayout()
-        self.update_step_button = QPushButton("更新选中")
+        history_button_grid = QGridLayout()
+        history_button_grid.setHorizontalSpacing(4)
+        history_button_grid.setVerticalSpacing(4)
+        self.update_step_button = QPushButton("更新")
         self.delete_step_button = QPushButton("删除")
         self.move_up_button = QPushButton("上移")
         self.move_down_button = QPushButton("下移")
         self.clear_steps_button = QPushButton("清空")
-        self.reuse_steps_button = QPushButton("应用上一组滤波链")
+        self.reuse_steps_button = QPushButton("上一组")
+        self.reuse_steps_button.setToolTip("载入本次运行中上一组数据使用的滤波链")
         self.update_step_button.clicked.connect(self._update_selected_step)
         self.delete_step_button.clicked.connect(self._delete_selected_step)
         self.move_up_button.clicked.connect(lambda: self._move_selected_step(-1))
         self.move_down_button.clicked.connect(lambda: self._move_selected_step(1))
         self.clear_steps_button.clicked.connect(self._clear_pipeline)
         self.reuse_steps_button.clicked.connect(self._reuse_previous_pipeline)
-        for button in (
+        for index, button in enumerate((
             self.update_step_button,
             self.delete_step_button,
             self.move_up_button,
             self.move_down_button,
             self.clear_steps_button,
             self.reuse_steps_button,
-        ):
-            history_button_row.addWidget(button)
-        history_layout.addLayout(history_button_row)
+        )):
+            history_button_grid.addWidget(button, index // 3, index % 3)
+        history_layout.addLayout(history_button_grid)
         self.auto_reapply_checkbox = QCheckBox("切换文件后自动应用当前滤波链")
         self.auto_reapply_checkbox.setChecked(self.auto_reapply)
         self.auto_reapply_checkbox.setToolTip(
@@ -661,42 +760,53 @@ class DASFilterDialog(QDialog):
         )
         self.auto_reapply_checkbox.toggled.connect(self._auto_reapply_toggled)
         history_layout.addWidget(self.auto_reapply_checkbox)
-        root.addWidget(history_group, 1)
+        history_group.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
+        content.addWidget(history_group)
 
         self.status_label = QLabel("设置参数后点击“添加并预览”，滤波链会从导入基线重新计算。")
         self.status_label.setWordWrap(True)
+        self.status_label.setToolTip(self.status_label.text())
         root.addWidget(self.status_label)
-        close_hint = QLabel("关闭工具窗会保留当前预览；“撤销未确认”恢复到最近一次确认的滤波链。")
-        close_hint.setWordWrap(True)
-        close_hint.setStyleSheet("color: #555;")
-        root.addWidget(close_hint)
+        close_hint_text = (
+            "切换页签会保留当前预览；“撤销未确认”恢复到最近一次确认的滤波链。"
+            if self.embedded else
+            "关闭工具窗会保留当前预览；“撤销未确认”恢复到最近一次确认的滤波链。"
+        )
+        if not self.embedded:
+            close_hint = QLabel(close_hint_text)
+            close_hint.setWordWrap(True)
+            close_hint.setStyleSheet("color: #555;")
+            root.addWidget(close_hint)
 
-        button_row = QHBoxLayout()
-        self.apply_button = QPushButton("添加并预览")
-        self.reset_button = QPushButton("恢复导入原始数据")
-        self.accept_button = QPushButton("确认当前结果")
+        button_grid = QGridLayout()
+        button_grid.setHorizontalSpacing(4)
+        button_grid.setVerticalSpacing(4)
+        self.apply_button = QPushButton("添加预览")
+        self.reset_button = QPushButton("恢复原始")
+        self.accept_button = QPushButton("确认结果")
         self.cancel_button = QPushButton("撤销未确认")
-        self.close_button = QPushButton("关闭")
+        self.close_button = QPushButton("返回数据" if self.embedded else "关闭")
         self.accept_button.setToolTip("把当前滤波链设为新的确认点")
         self.cancel_button.setToolTip("恢复到最近一次点击“确认当前结果”时的滤波链")
         self.apply_button.clicked.connect(self._start_filter)
         self.reset_button.clicked.connect(self._reset)
         self.accept_button.clicked.connect(self._commit_current)
         self.cancel_button.clicked.connect(self._revert_uncommitted)
-        self.close_button.clicked.connect(self.hide)
-        for button in (
+        self.close_button.clicked.connect(self._close_requested)
+        for index, button in enumerate((
             self.apply_button,
             self.reset_button,
             self.accept_button,
             self.cancel_button,
             self.close_button,
-        ):
-            button_row.addWidget(button)
-        root.addLayout(button_row)
+        )):
+            button_grid.addWidget(button, index // 3, index % 3)
+        root.addLayout(button_grid)
 
         self._update_parameter_visibility()
         self._update_range_controls()
         self._update_range_info()
+        self._update_saved_pipeline_buttons()
 
     def filter_settings(self) -> Dict[str, object]:
         """Return the algorithm settings to reuse while the same file is open."""
@@ -794,11 +904,20 @@ class DASFilterDialog(QDialog):
     def _set_form_row_visible(layout, row: int, visible: bool) -> None:
         for role in (QFormLayout.LabelRole, QFormLayout.FieldRole):
             item = layout.itemAt(row, role)
-            if item and item.widget():
+            if not item:
+                continue
+            if item.widget():
                 item.widget().setVisible(visible)
+            elif item.layout():
+                for index in range(item.layout().count()):
+                    child = item.layout().itemAt(index)
+                    if child.widget():
+                        child.widget().setVisible(visible)
 
     def _update_range_controls(self) -> None:
         enabled = self.scope_combo.currentData() == "custom"
+        for row in (2, 3, 4):
+            self._set_form_row_visible(self.range_form, row, enabled)
         for box in (
             self.channel_from,
             self.channel_to,
@@ -1062,6 +1181,75 @@ class DASFilterDialog(QDialog):
         self.move_down_button.setEnabled(selected and row < count - 1 and not self.is_busy())
         self.clear_steps_button.setEnabled(count > 0 and not self.is_busy())
         self.reuse_steps_button.setEnabled(bool(self.previous_steps) and not self.is_busy())
+        self._update_saved_pipeline_buttons()
+
+    def set_saved_pipelines(self, entries) -> None:
+        """Refresh the persisted-history picker without changing the active chain."""
+
+        current_identifier = self.saved_pipeline_combo.currentData()
+        self.saved_pipeline_combo.blockSignals(True)
+        self.saved_pipeline_combo.clear()
+        named = [entry for entry in entries if entry.get("kind") == "named"]
+        recent = [entry for entry in entries if entry.get("kind") == "recent"]
+        for entry in named:
+            self.saved_pipeline_combo.addItem(
+                f"方案｜{entry.get('name', '')}",
+                entry.get("identifier"),
+            )
+        if named and recent:
+            self.saved_pipeline_combo.insertSeparator(self.saved_pipeline_combo.count())
+        for entry in recent:
+            saved_at = str(entry.get("saved_at", "")).replace("T", " ")
+            display_time = saved_at[5:16] if len(saved_at) >= 16 else saved_at
+            self.saved_pipeline_combo.addItem(
+                f"最近｜{display_time}｜{len(entry.get('steps', []))} 步",
+                entry.get("identifier"),
+            )
+        if current_identifier:
+            index = self.saved_pipeline_combo.findData(current_identifier)
+            if index >= 0:
+                self.saved_pipeline_combo.setCurrentIndex(index)
+        self.saved_pipeline_combo.blockSignals(False)
+        self._update_saved_pipeline_buttons()
+
+    def _update_saved_pipeline_buttons(self, *_args) -> None:
+        busy = self._ui_busy or self.is_busy()
+        has_saved = bool(self.saved_pipeline_combo.currentData())
+        has_current = len(self.pipeline) > 0
+        self.load_saved_pipeline_button.setEnabled(has_saved and not busy)
+        self.delete_saved_pipeline_button.setEnabled(has_saved and not busy)
+        self.save_pipeline_button.setEnabled(has_current and not busy)
+
+    def _request_save_pipeline(self) -> None:
+        if self.is_busy() or len(self.pipeline) == 0:
+            return
+        name, accepted = QInputDialog.getText(
+            self,
+            "保存滤波方案",
+            "方案名称",
+            text="我的滤波方案",
+        )
+        if accepted and name.strip():
+            self.savePipelineRequested.emit(name.strip())
+
+    def _request_load_pipeline(self) -> None:
+        identifier = self.saved_pipeline_combo.currentData()
+        if identifier and not self.is_busy():
+            self.loadPipelineRequested.emit(str(identifier))
+
+    def _request_delete_pipeline(self) -> None:
+        identifier = self.saved_pipeline_combo.currentData()
+        if not identifier or self.is_busy():
+            return
+        reply = QMessageBox.question(
+            self,
+            "删除滤波方案",
+            f"确定删除“{self.saved_pipeline_combo.currentText()}”吗？",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply == QMessageBox.Yes:
+            self.deletePipelineRequested.emit(str(identifier))
 
     def _load_selected_step(self, row: int) -> None:
         self._update_history_buttons()
@@ -1072,7 +1260,8 @@ class DASFilterDialog(QDialog):
         try:
             self._set_combo_data(self.algorithm_combo, step.algorithm)
             self._set_combo_data(self.processing_mode_combo, step.processing_mode)
-            self._set_combo_data(self.scope_combo, "custom")
+            scope = "visible" if tuple(step.selection) == tuple(self.visible_range) else "custom"
+            self._set_combo_data(self.scope_combo, scope)
             channel_from, channel_to, sample_from, sample_to = step.selection
             self.channel_from.setValue(channel_from)
             self.channel_to.setValue(channel_to)
@@ -1252,11 +1441,13 @@ class DASFilterDialog(QDialog):
         self._worker.start()
 
     def _set_busy(self, busy: bool) -> None:
+        self._ui_busy = bool(busy)
         self.apply_button.setEnabled(not busy)
         self.reset_button.setEnabled(not busy)
         self.accept_button.setEnabled(not busy)
         self.cancel_button.setEnabled(not busy)
         self.history_list.setEnabled(not busy)
+        self.saved_pipeline_combo.setEnabled(not busy)
         if busy:
             for button in (
                 self.update_step_button,
@@ -1269,6 +1460,7 @@ class DASFilterDialog(QDialog):
                 button.setEnabled(False)
         else:
             self._update_history_buttons()
+        self._update_saved_pipeline_buttons()
 
     def _replay_finished(self, result) -> None:
         self.pipeline = FilterPipeline(self._pending_steps)
@@ -1300,15 +1492,17 @@ class DASFilterDialog(QDialog):
             return
         self._start_replay([], "恢复导入原始数据", -1)
 
-    def _store_commit(self) -> None:
+    def _store_commit(self, remember: bool = False) -> None:
         self.committed_steps = self.pipeline.steps()
         self.committed.emit(self.working_data.copy())
         self.settingsChanged.emit(self.filter_settings())
         self.status_label.setText(f"已确认当前结果，共 {len(self.committed_steps)} 个滤波步骤。")
+        if remember and self.committed_steps:
+            self.pipelineConfirmedByUser.emit(self.committed_steps)
 
     def _commit_current(self) -> None:
         if not self.is_busy():
-            self._store_commit()
+            self._store_commit(remember=True)
 
     def _revert_uncommitted(self) -> None:
         if self.is_busy():
@@ -1322,14 +1516,20 @@ class DASFilterDialog(QDialog):
     def accept(self) -> None:
         if self.is_busy():
             return
-        self._store_commit()
-        self.hide()
+        self._store_commit(remember=True)
+        self._close_requested()
 
     def reject(self) -> None:
-        self.hide()
+        self._close_requested()
+
+    def _close_requested(self) -> None:
+        if self.embedded:
+            self.backRequested.emit()
+        else:
+            self.hide()
 
     def closeEvent(self, event) -> None:
         """Hide the persistent tool and keep the current preview and history."""
 
         event.ignore()
-        self.hide()
+        self._close_requested()

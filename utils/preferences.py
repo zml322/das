@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+from copy import deepcopy
 from typing import Optional
 
 from PyQt5.QtCore import QSettings
@@ -10,6 +12,7 @@ from PyQt5.QtCore import QSettings
 class AppPreferences:
     TIME_CORRECTION_KEY = "timeline/device_behind_seconds"
     AUTO_FILTER_KEY = "filter/auto_reapply_pipeline"
+    FILTER_HISTORY_KEY = "filter/pipeline_history_v1"
 
     def __init__(self, settings: Optional[QSettings] = None):
         self.settings = settings or QSettings("DASViewer", "DASViewer")
@@ -33,4 +36,21 @@ class AppPreferences:
 
     def set_auto_reapply_filter(self, enabled: bool) -> None:
         self.settings.setValue(self.AUTO_FILTER_KEY, bool(enabled))
+        self.settings.sync()
+
+    def filter_pipeline_history(self):
+        """Return the JSON-compatible saved filter history, or an empty list."""
+
+        value = self.settings.value(self.FILTER_HISTORY_KEY, "[]")
+        if isinstance(value, list):
+            return deepcopy(value)
+        try:
+            parsed = json.loads(str(value))
+        except (TypeError, ValueError):
+            return []
+        return deepcopy(parsed) if isinstance(parsed, list) else []
+
+    def set_filter_pipeline_history(self, entries) -> None:
+        payload = json.dumps(list(entries), ensure_ascii=False, separators=(",", ":"))
+        self.settings.setValue(self.FILTER_HISTORY_KEY, payload)
         self.settings.sync()
