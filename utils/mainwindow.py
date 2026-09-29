@@ -800,7 +800,7 @@ class MainWindow(QMainWindow):
         self.filter_sidebar_layout.addWidget(self.filter_sidebar_placeholder)
 
         self.sidebar_tabs = QTabWidget()
-        self.sidebar_tabs.setMinimumWidth(360)
+        self.sidebar_tabs.setMinimumWidth(420)
         self.sidebar_tabs.addTab(self.data_sidebar_widget, '数据')
         self.sidebar_tabs.addTab(self.filter_sidebar_widget, '二维滤波')
         self.sidebar_tabs.currentChanged.connect(self._sidebarTabChanged)
@@ -816,7 +816,7 @@ class MainWindow(QMainWindow):
         self.main_splitter.addWidget(content_widget)
         self.main_splitter.setStretchFactor(0, 0)
         self.main_splitter.setStretchFactor(1, 1)
-        self.main_splitter.setSizes([390, 1000])
+        self.main_splitter.setSizes([460, 1000])
 
         main_window_hbox.addWidget(self.main_splitter)
         main_window_widget.setLayout(main_window_hbox)
@@ -3031,18 +3031,21 @@ class MainWindow(QMainWindow):
             try:
                 steps = self.adaptPreviousFilterSteps()
             except ValueError as error:
-                self.das_filter_dialog.status_label.setText(f'未自动应用上一组滤波链：{error}')
-                self.statusBar().showMessage(f'未自动应用上一组滤波链：{error}', 12000)
+                self.das_filter_dialog.status_label.setText(f'未自动应用最近一次成功滤波链：{error}')
+                self.statusBar().showMessage(f'未自动应用最近一次成功滤波链：{error}', 12000)
             else:
                 if self.das_filter_dialog.replayExternalPipeline(
                     steps,
-                    '切换文件后自动应用上一组滤波链',
+                    '切换文件后自动应用最近一次成功滤波链',
                     commit_after=True,
                 ):
-                    self.statusBar().showMessage('正在从新文件原始基线自动回放上一组滤波链……')
+                    self.statusBar().showMessage('正在从新文件原始数据自动应用最近一次成功滤波链……')
 
     def setDASFilterPipeline(self, steps):
         self._das_filter_steps = clone_steps(steps)
+        if self._das_filter_steps and self.raw_data is not None:
+            self._last_das_filter_steps = clone_steps(self._das_filter_steps)
+            self._last_das_filter_shape = tuple(self.raw_data.shape)
         self.reset_das_filter_action.setEnabled(bool(self._das_filter_steps))
 
     def setDASFilterSettings(self, settings):
@@ -3127,7 +3130,7 @@ class MainWindow(QMainWindow):
         ), None)
 
     def loadSavedFilterPipeline(self, identifier: str):
-        """Validate and preview a saved chain without automatically committing it."""
+        """Validate and load a saved chain into the editor without processing data."""
 
         if self.raw_data is None or self.das_filter_dialog is None:
             return
@@ -3145,13 +3148,12 @@ class MainWindow(QMainWindow):
         except (TypeError, ValueError) as error:
             QMessageBox.warning(self, '滤波方案与当前数据不兼容', str(error))
             return
-        if self.das_filter_dialog.replayExternalPipeline(
+        if self.das_filter_dialog.set_draft_pipeline(
             adapted,
-            f'载入保存方案“{entry.get("name", "")}”',
-            commit_after=False,
+            f'已载入保存方案“{entry.get("name", "")}”',
         ):
             self.statusBar().showMessage(
-                f'正在载入并预览滤波方案“{entry.get("name", "")}”；确认前可撤销。',
+                f'已载入滤波方案“{entry.get("name", "")}”；主图未改变，点击“应用滤波”后统一计算。',
                 8000,
             )
 
@@ -3279,6 +3281,9 @@ class MainWindow(QMainWindow):
             return
         if self.das_filter_dialog is not None and self.das_filter_dialog.is_busy():
             printError('滤波链正在计算，请等待完成后再恢复原始数据')
+            return
+        if self.das_filter_dialog is not None:
+            self.das_filter_dialog.restore_original()
             return
         self.clearVehicleTrajectories(update=False)
         self._das_filter_steps = []

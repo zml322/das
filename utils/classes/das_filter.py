@@ -23,7 +23,6 @@ from PyQt5.QtWidgets import (
     QDoubleSpinBox,
     QFormLayout,
     QFrame,
-    QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QInputDialog,
@@ -35,6 +34,8 @@ from PyQt5.QtWidgets import (
     QScrollArea,
     QSizePolicy,
     QSpinBox,
+    QStyle,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -411,7 +412,6 @@ class DASFilterDialog(QDialog):
             self.setWindowFlags(Qt.Widget)
             self.setMinimumSize(0, 0)
             self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-            self.setStyleSheet('QGroupBox { margin-top: 6px; padding-top: 4px; }')
         else:
             self.setWindowFlag(Qt.Tool, True)
             self.resize(410, 720)
@@ -442,13 +442,17 @@ class DASFilterDialog(QDialog):
         self._pending_description = ""
         self._pending_selected_row = -1
         self._pending_commit = False
+        self._pending_remember = False
+        self._pending_update_draft = True
         self._syncing_range = False
         self._refreshing_history = False
         self._loading_step = False
         self._ui_busy = False
+        self._draft_dirty = False
         self._build_ui()
         self._restore_filter_settings(settings)
         self._refresh_history()
+        self._update_draft_state()
 
     def _normalize_range(self, values: Tuple[int, int, int, int]):
         channel_from, channel_to, sample_from, sample_to = map(int, values)
@@ -477,6 +481,7 @@ class DASFilterDialog(QDialog):
         self.scroll_area.setWidgetResizable(True)
         self.scroll_area.setFrameShape(QFrame.NoFrame)
         self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         scroll_content = QWidget()
         content = QVBoxLayout(scroll_content)
         content.setContentsMargins(0, 0, 0, 0)
@@ -487,7 +492,7 @@ class DASFilterDialog(QDialog):
 
         algorithm_group = QGroupBox("算法")
         algorithm_form = QFormLayout(algorithm_group)
-        algorithm_form.setContentsMargins(6, 4, 6, 4)
+        algorithm_form.setContentsMargins(8, 10, 8, 8)
         algorithm_form.setHorizontalSpacing(6)
         algorithm_form.setVerticalSpacing(2)
         self.algorithm_combo = QComboBox()
@@ -499,7 +504,7 @@ class DASFilterDialog(QDialog):
         algorithm_form.addRow("处理方法", self.algorithm_combo)
         backend = "DASPy" if HAS_DASPY_BASIC else "SciPy 兼容实现"
         backend_label = QLabel(f"基础滤波后端：{backend}")
-        backend_label.setStyleSheet("color: #555;")
+        backend_label.setObjectName("secondaryLabel")
         algorithm_form.addRow("", backend_label)
         algorithm_group.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
         content.addWidget(algorithm_group)
@@ -507,7 +512,7 @@ class DASFilterDialog(QDialog):
         range_group = QGroupBox("处理范围（包含起止点）")
         range_form = QFormLayout(range_group)
         self.range_form = range_form
-        range_form.setContentsMargins(6, 4, 6, 4)
+        range_form.setContentsMargins(8, 10, 8, 8)
         range_form.setHorizontalSpacing(6)
         range_form.setVerticalSpacing(2)
         self.scope_combo = QComboBox()
@@ -519,8 +524,8 @@ class DASFilterDialog(QDialog):
         self.processing_mode_combo = QComboBox()
         self.processing_mode_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
         self.processing_mode_combo.setMinimumContentsLength(12)
-        self.processing_mode_combo.addItem("整体连续处理（跨文件边界）", "continuous")
-        self.processing_mode_combo.addItem("按文件分段处理", "per_segment")
+        self.processing_mode_combo.addItem("整体连续（跨文件边界）", "continuous")
+        self.processing_mode_combo.addItem("按文件分段", "per_segment")
         self.processing_mode_combo.setEnabled(len(self.segment_ranges) > 1)
         self.processing_mode_combo.setToolTip(
             "确认文件连续时可整体处理；不确定时按文件分段可避免滤波跨越接缝。"
@@ -566,6 +571,7 @@ class DASFilterDialog(QDialog):
 
         self.range_info = QLabel()
         self.range_info.setWordWrap(True)
+        self.range_info.setObjectName("secondaryLabel")
         range_form.addRow("范围说明", self.range_info)
         for box in (self.channel_from, self.channel_to):
             box.valueChanged.connect(self._update_range_info)
@@ -578,7 +584,7 @@ class DASFilterDialog(QDialog):
 
         parameter_group = QGroupBox("算法参数")
         parameter_form = QFormLayout(parameter_group)
-        parameter_form.setContentsMargins(6, 4, 6, 4)
+        parameter_form.setContentsMargins(8, 10, 8, 8)
         parameter_form.setHorizontalSpacing(6)
         parameter_form.setVerticalSpacing(2)
 
@@ -606,8 +612,9 @@ class DASFilterDialog(QDialog):
         self.order = self._make_spinbox(1, 12, 4)
         self.order.setMaximumWidth(150)
         parameter_form.addRow("滤波阶数", self.order)
-        self.zero_phase = QCheckBox("启用零相位（前后向滤波）")
+        self.zero_phase = QCheckBox("零相位（前后向）")
         self.zero_phase.setChecked(True)
+        self.zero_phase.setToolTip("启用前后向滤波以获得零相位响应")
         parameter_form.addRow("相位", self.zero_phase)
 
         self.channel_window = self._make_spinbox(
@@ -679,22 +686,31 @@ class DASFilterDialog(QDialog):
             "dx 必须是实际相邻通道距离，不是 gauge length。"
         )
         self.fk_hint.setWordWrap(True)
-        self.fk_hint.setStyleSheet("color: #555;")
+        self.fk_hint.setObjectName("secondaryLabel")
         parameter_form.addRow("", self.fk_hint)
+
+        add_step_row = QHBoxLayout()
+        add_step_row.addStretch(1)
+        self.add_step_button = QPushButton("加入滤波链")
+        self.add_step_button.setToolTip("把当前算法、参数和范围加入待应用滤波链；不会立即计算或重绘")
+        self.add_step_button.clicked.connect(self._add_step_to_pipeline)
+        add_step_row.addWidget(self.add_step_button)
+        parameter_form.addRow("", add_step_row)
         parameter_group.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
         content.addWidget(parameter_group)
 
         history_group = QGroupBox("滤波链")
         history_layout = QVBoxLayout(history_group)
-        history_layout.setContentsMargins(6, 4, 6, 4)
-        history_layout.setSpacing(4)
+        history_layout.setContentsMargins(8, 10, 8, 8)
+        history_layout.setSpacing(6)
 
         saved_pipeline_row = QHBoxLayout()
         saved_pipeline_row.setSpacing(4)
-        saved_pipeline_row.addWidget(QLabel("保存历史"))
+        saved_pipeline_row.addWidget(QLabel("滤波方案"))
         self.saved_pipeline_combo = QComboBox()
         self.saved_pipeline_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
         self.saved_pipeline_combo.setMinimumContentsLength(10)
+        self.saved_pipeline_combo.setPlaceholderText("暂无已保存方案")
         self.saved_pipeline_combo.setToolTip("命名方案和最近确认的滤波链会在下次启动时保留")
         self.saved_pipeline_combo.currentIndexChanged.connect(self._update_saved_pipeline_buttons)
         saved_pipeline_row.addWidget(self.saved_pipeline_combo, 1)
@@ -702,7 +718,7 @@ class DASFilterDialog(QDialog):
 
         saved_button_row = QHBoxLayout()
         saved_button_row.setSpacing(4)
-        self.load_saved_pipeline_button = QPushButton("载入预览")
+        self.load_saved_pipeline_button = QPushButton("载入方案")
         self.save_pipeline_button = QPushButton("保存方案")
         self.delete_saved_pipeline_button = QPushButton("删除方案")
         self.load_saved_pipeline_button.clicked.connect(self._request_load_pipeline)
@@ -715,45 +731,62 @@ class DASFilterDialog(QDialog):
         ):
             saved_button_row.addWidget(button)
         history_layout.addLayout(saved_button_row)
-        history_layout.addWidget(QLabel("当前链（勾选表示启用）"))
+        chain_header = QHBoxLayout()
+        chain_header.addWidget(QLabel("当前链（勾选表示启用）"))
+        chain_header.addStretch(1)
+        self.pipeline_state_label = QLabel()
+        self.pipeline_state_label.setObjectName("pipelineStateLabel")
+        chain_header.addWidget(self.pipeline_state_label)
+        history_layout.addLayout(chain_header)
 
         self.history_list = QListWidget()
-        self.history_list.setMinimumHeight(92)
-        self.history_list.setMaximumHeight(120)
+        self.history_list.setMinimumHeight(132)
+        self.history_list.setMaximumHeight(190)
         self.history_list.setAlternatingRowColors(True)
         self.history_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.history_list.setTextElideMode(Qt.ElideRight)
+        self.history_list.setWordWrap(True)
+        self.history_list.setSpacing(2)
+        self.history_list.setTextElideMode(Qt.ElideNone)
         self.history_list.itemChanged.connect(self._history_item_changed)
         self.history_list.currentRowChanged.connect(self._load_selected_step)
         history_layout.addWidget(self.history_list)
 
-        history_button_grid = QGridLayout()
-        history_button_grid.setHorizontalSpacing(4)
-        history_button_grid.setVerticalSpacing(4)
-        self.update_step_button = QPushButton("更新")
-        self.delete_step_button = QPushButton("删除")
-        self.move_up_button = QPushButton("上移")
-        self.move_down_button = QPushButton("下移")
-        self.clear_steps_button = QPushButton("清空")
-        self.reuse_steps_button = QPushButton("上一组")
-        self.reuse_steps_button.setToolTip("载入本次运行中上一组数据使用的滤波链")
+        history_button_row = QHBoxLayout()
+        history_button_row.setSpacing(4)
+        self.update_step_button = QToolButton()
+        self.delete_step_button = QToolButton()
+        self.move_up_button = QToolButton()
+        self.move_down_button = QToolButton()
+        tool_buttons = (
+            (self.update_step_button, QStyle.SP_DialogApplyButton, "替换选中步骤", "用当前参数替换选中的滤波步骤"),
+            (self.delete_step_button, getattr(QStyle, "SP_TrashIcon", QStyle.SP_DialogCancelButton), "删除选中步骤", "删除选中的滤波步骤"),
+            (self.move_up_button, QStyle.SP_ArrowUp, "上移选中步骤", "上移选中的滤波步骤"),
+            (self.move_down_button, QStyle.SP_ArrowDown, "下移选中步骤", "下移选中的滤波步骤"),
+        )
+        for button, icon_id, accessible_name, tooltip in tool_buttons:
+            button.setIcon(self.style().standardIcon(icon_id))
+            button.setAccessibleName(accessible_name)
+            button.setToolTip(tooltip)
+            button.setObjectName("pipelineToolButton")
+            button.setAutoRaise(False)
+        self.clear_steps_button = QPushButton("清空链")
+        self.clear_steps_button.setToolTip("仅清空待应用滤波链；不会立即改变主图")
         self.update_step_button.clicked.connect(self._update_selected_step)
         self.delete_step_button.clicked.connect(self._delete_selected_step)
         self.move_up_button.clicked.connect(lambda: self._move_selected_step(-1))
         self.move_down_button.clicked.connect(lambda: self._move_selected_step(1))
         self.clear_steps_button.clicked.connect(self._clear_pipeline)
-        self.reuse_steps_button.clicked.connect(self._reuse_previous_pipeline)
-        for index, button in enumerate((
+        for button in (
             self.update_step_button,
             self.delete_step_button,
             self.move_up_button,
             self.move_down_button,
-            self.clear_steps_button,
-            self.reuse_steps_button,
-        )):
-            history_button_grid.addWidget(button, index // 3, index % 3)
-        history_layout.addLayout(history_button_grid)
-        self.auto_reapply_checkbox = QCheckBox("切换文件后自动应用当前滤波链")
+        ):
+            history_button_row.addWidget(button)
+        history_button_row.addStretch(1)
+        history_button_row.addWidget(self.clear_steps_button)
+        history_layout.addLayout(history_button_row)
+        self.auto_reapply_checkbox = QCheckBox("切换文件后自动应用最近一次成功应用的滤波链")
         self.auto_reapply_checkbox.setChecked(self.auto_reapply)
         self.auto_reapply_checkbox.setToolTip(
             "自动从新文件的导入基线重新回放相同步骤；不兼容时保持原始数据并提示"
@@ -763,45 +796,24 @@ class DASFilterDialog(QDialog):
         history_group.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
         content.addWidget(history_group)
 
-        self.status_label = QLabel("设置参数后点击“添加并预览”，滤波链会从导入基线重新计算。")
+        self.status_label = QLabel("先编辑完整滤波链，再点击“应用滤波”一次性计算和绘图。")
         self.status_label.setWordWrap(True)
         self.status_label.setToolTip(self.status_label.text())
+        self.status_label.setObjectName("filterStatusLabel")
         root.addWidget(self.status_label)
-        close_hint_text = (
-            "切换页签会保留当前预览；“撤销未确认”恢复到最近一次确认的滤波链。"
-            if self.embedded else
-            "关闭工具窗会保留当前预览；“撤销未确认”恢复到最近一次确认的滤波链。"
-        )
-        if not self.embedded:
-            close_hint = QLabel(close_hint_text)
-            close_hint.setWordWrap(True)
-            close_hint.setStyleSheet("color: #555;")
-            root.addWidget(close_hint)
 
-        button_grid = QGridLayout()
-        button_grid.setHorizontalSpacing(4)
-        button_grid.setVerticalSpacing(4)
-        self.apply_button = QPushButton("添加预览")
-        self.reset_button = QPushButton("恢复原始")
-        self.accept_button = QPushButton("确认结果")
-        self.cancel_button = QPushButton("撤销未确认")
-        self.close_button = QPushButton("返回数据" if self.embedded else "关闭")
-        self.accept_button.setToolTip("把当前滤波链设为新的确认点")
-        self.cancel_button.setToolTip("恢复到最近一次点击“确认当前结果”时的滤波链")
-        self.apply_button.clicked.connect(self._start_filter)
+        button_row = QHBoxLayout()
+        button_row.setSpacing(6)
+        self.apply_button = QPushButton("应用滤波")
+        self.apply_button.setObjectName("primaryAction")
+        self.apply_button.setToolTip("从不可变原始数据出发，一次性执行所有已启用步骤并刷新主图")
+        self.reset_button = QPushButton("恢复原始数据")
+        self.reset_button.setToolTip("恢复导入后的原始数据，但保留当前滤波链配置")
+        self.apply_button.clicked.connect(self._apply_pipeline)
         self.reset_button.clicked.connect(self._reset)
-        self.accept_button.clicked.connect(self._commit_current)
-        self.cancel_button.clicked.connect(self._revert_uncommitted)
-        self.close_button.clicked.connect(self._close_requested)
-        for index, button in enumerate((
-            self.apply_button,
-            self.reset_button,
-            self.accept_button,
-            self.cancel_button,
-            self.close_button,
-        )):
-            button_grid.addWidget(button, index // 3, index % 3)
-        root.addLayout(button_grid)
+        button_row.addWidget(self.apply_button, 1)
+        button_row.addWidget(self.reset_button, 1)
+        root.addLayout(button_row)
 
         self._update_parameter_visibility()
         self._update_range_controls()
@@ -1034,6 +1046,54 @@ class DASFilterDialog(QDialog):
     def pipeline_steps(self) -> List[FilterStep]:
         return self.pipeline.steps()
 
+    @staticmethod
+    def _steps_match(left: Iterable[FilterStep], right: Iterable[FilterStep]) -> bool:
+        return (
+            [step.to_dict() for step in left]
+            == [step.to_dict() for step in right]
+        )
+
+    def _set_status(self, text: str) -> None:
+        self.status_label.setText(text)
+        self.status_label.setToolTip(text)
+
+    def _update_draft_state(self, message: Optional[str] = None) -> None:
+        steps = self.pipeline.steps()
+        self._draft_dirty = not self._steps_match(steps, self.committed_steps)
+        busy = self._ui_busy or self.is_busy()
+        enabled_count = sum(step.enabled for step in steps)
+
+        if busy:
+            state = "busy"
+            state_text = "正在处理"
+        elif self._draft_dirty:
+            state = "pending"
+            state_text = f"{len(steps)} 步 · 待应用"
+        elif self.committed_steps:
+            state = "applied"
+            state_text = f"{len(self.committed_steps)} 步 · 已应用"
+        else:
+            state = "empty"
+            state_text = "当前为原始数据"
+
+        self.pipeline_state_label.setText(state_text)
+        self.pipeline_state_label.setProperty("state", state)
+        self.pipeline_state_label.style().unpolish(self.pipeline_state_label)
+        self.pipeline_state_label.style().polish(self.pipeline_state_label)
+
+        self.add_step_button.setEnabled(not busy)
+        self.apply_button.setEnabled(not busy and self._draft_dirty and enabled_count > 0)
+        self.reset_button.setEnabled(not busy and bool(self.committed_steps))
+        if message is not None:
+            self._set_status(message)
+        elif not busy:
+            if self._draft_dirty:
+                self._set_status("滤波链已修改，主图保持不变；点击“应用滤波”后一次性计算。")
+            elif self.committed_steps:
+                self._set_status(f"当前显示已应用结果，共 {len(self.committed_steps)} 个滤波步骤。")
+            else:
+                self._set_status("当前显示原始数据；请先编辑滤波链，再点击“应用滤波”。")
+
     def is_busy(self) -> bool:
         return self._worker is not None and self._worker.isRunning()
 
@@ -1097,10 +1157,17 @@ class DASFilterDialog(QDialog):
             )
         self._update_range_controls()
         self._refresh_history()
-        self.status_label.setText(
-            f"已切换到新数据组：{self.channel_count} 通道，{self.sample_count} 采样点；"
-            "参数预设已保留，当前滤波链已清空。"
-        )
+        if self.committed_steps:
+            message = (
+                f"已切换到新数据组：{self.channel_count} 通道，{self.sample_count} 采样点；"
+                f"当前显示已应用的 {len(self.committed_steps)} 步滤波结果。"
+            )
+        else:
+            message = (
+                f"已切换到新数据组：{self.channel_count} 通道，{self.sample_count} 采样点；"
+                "当前显示原始数据。"
+            )
+        self._update_draft_state(message)
 
     @staticmethod
     def _set_combo_data(combo: QComboBox, value: object) -> None:
@@ -1146,7 +1213,7 @@ class DASFilterDialog(QDialog):
         channel_from, channel_to, sample_from, sample_to = step.selection
         mode = "整体连续" if step.processing_mode == "continuous" else "按文件分段"
         return (
-            f"{index + 1}. {step.label}｜{self._parameter_summary(step)}｜"
+            f"{index + 1}. {step.label}｜{self._parameter_summary(step)}\n"
             f"通道 {channel_from}-{channel_to}｜采样 {sample_from}-{sample_to}｜{mode}"
         )
 
@@ -1160,7 +1227,9 @@ class DASFilterDialog(QDialog):
                 item = QListWidgetItem(self._step_text(index, step))
                 item.setFlags(item.flags() | Qt.ItemIsUserCheckable | Qt.ItemIsSelectable | Qt.ItemIsEnabled)
                 item.setCheckState(Qt.Checked if step.enabled else Qt.Unchecked)
-                item.setToolTip(f"参数：{step.parameters!r}\n步骤 ID：{step.identifier}")
+                item.setToolTip(
+                    f"{self._step_text(index, step)}\n参数：{step.parameters!r}\n步骤 ID：{step.identifier}"
+                )
                 self.history_list.addItem(item)
             if steps:
                 active_row = selected_row if 0 <= selected_row < len(steps) else 0
@@ -1170,6 +1239,7 @@ class DASFilterDialog(QDialog):
         self._update_history_buttons()
         if active_row >= 0:
             self._load_selected_step(active_row)
+        self._update_draft_state()
 
     def _update_history_buttons(self) -> None:
         row = self.history_list.currentRow()
@@ -1180,8 +1250,8 @@ class DASFilterDialog(QDialog):
         self.move_up_button.setEnabled(selected and row > 0 and not self.is_busy())
         self.move_down_button.setEnabled(selected and row < count - 1 and not self.is_busy())
         self.clear_steps_button.setEnabled(count > 0 and not self.is_busy())
-        self.reuse_steps_button.setEnabled(bool(self.previous_steps) and not self.is_busy())
         self._update_saved_pipeline_buttons()
+        self._update_draft_state()
 
     def set_saved_pipelines(self, entries) -> None:
         """Refresh the persisted-history picker without changing the active chain."""
@@ -1307,10 +1377,45 @@ class DASFilterDialog(QDialog):
         if steps[row].enabled == enabled:
             return
         steps[row].enabled = enabled
+        self.pipeline = FilterPipeline(steps)
         state = "启用" if enabled else "禁用"
-        self._start_replay(steps, f"{state}第 {row + 1} 个滤波步骤", row)
+        self._update_history_buttons()
+        self._update_draft_state(
+            f"已{state}第 {row + 1} 个滤波步骤；主图保持不变，等待一次性应用。"
+        )
 
-    def _start_filter(self) -> None:
+    def _replace_draft_steps(
+        self,
+        steps: Iterable[FilterStep],
+        selected_row: int,
+        message: str,
+    ) -> None:
+        self.pipeline = FilterPipeline(steps)
+        self._refresh_history(selected_row)
+        self.settingsChanged.emit(self.filter_settings())
+        self._update_draft_state(message)
+
+    def set_draft_pipeline(
+        self,
+        steps: Iterable[FilterStep],
+        description: str = "已载入滤波方案",
+        *,
+        new_identifiers: bool = True,
+    ) -> bool:
+        """Replace the editable chain without processing data or redrawing plots."""
+
+        if self.is_busy():
+            return False
+        candidate = clone_steps(steps, new_identifiers=new_identifiers)
+        selected_row = len(candidate) - 1
+        self._replace_draft_steps(
+            candidate,
+            selected_row,
+            f"{description}；主图保持不变，点击“应用滤波”后一次性计算。",
+        )
+        return True
+
+    def _add_step_to_pipeline(self) -> None:
         if self.is_busy():
             return
         channel_from, channel_to, sample_from, sample_to = self._selected_range()
@@ -1320,11 +1425,16 @@ class DASFilterDialog(QDialog):
         step = self._make_step()
         steps = self.pipeline.steps()
         steps.append(step)
-        self._start_replay(
+        self._replace_draft_steps(
             steps,
-            f"添加 {step.label}：通道 {channel_from}-{channel_to}，采样点 {sample_from}-{sample_to}",
             len(steps) - 1,
+            f"已将“{step.label}”加入滤波链；尚未计算或重绘。",
         )
+
+    def _start_filter(self) -> None:
+        """Compatibility alias for the former add-and-preview action."""
+
+        self._add_step_to_pipeline()
 
     def _update_selected_step(self) -> None:
         row = self.history_list.currentRow()
@@ -1333,7 +1443,11 @@ class DASFilterDialog(QDialog):
         steps = self.pipeline.steps()
         current = steps[row]
         steps[row] = self._make_step(current.identifier, current.enabled)
-        self._start_replay(steps, f"更新第 {row + 1} 个滤波步骤", row)
+        self._replace_draft_steps(
+            steps,
+            row,
+            f"已更新第 {row + 1} 个滤波步骤；尚未计算或重绘。",
+        )
 
     def _delete_selected_step(self) -> None:
         row = self.history_list.currentRow()
@@ -1341,7 +1455,11 @@ class DASFilterDialog(QDialog):
             return
         steps = self.pipeline.steps()
         removed = steps.pop(row)
-        self._start_replay(steps, f"删除 {removed.label}", min(row, len(steps) - 1))
+        self._replace_draft_steps(
+            steps,
+            min(row, len(steps) - 1),
+            f"已从待应用链删除“{removed.label}”；主图保持不变。",
+        )
 
     def _move_selected_step(self, offset: int) -> None:
         row = self.history_list.currentRow()
@@ -1351,23 +1469,19 @@ class DASFilterDialog(QDialog):
         steps = self.pipeline.steps()
         step = steps.pop(row)
         steps.insert(destination, step)
-        self._start_replay(steps, f"调整第 {row + 1} 个滤波步骤的顺序", destination)
+        self._replace_draft_steps(
+            steps,
+            destination,
+            "已调整滤波步骤顺序；主图保持不变，等待一次性应用。",
+        )
 
     def _clear_pipeline(self) -> None:
         if self.is_busy() or len(self.pipeline) == 0:
             return
-        self._start_replay([], "清空滤波链并恢复导入原始数据", -1)
-
-    def _reuse_previous_pipeline(self) -> None:
-        if self.is_busy():
-            return
-        if not self.previous_steps:
-            QMessageBox.information(self, "没有历史滤波链", "上一组数据没有可复用的滤波步骤。")
-            return
-        self.replayExternalPipeline(
-            self.previous_steps,
-            "应用上一组数据的滤波链",
-            commit_after=False,
+        self._replace_draft_steps(
+            [],
+            -1,
+            "已清空待应用滤波链；主图未改变，如需恢复请点击“恢复原始数据”。",
         )
 
     def replayExternalPipeline(
@@ -1383,7 +1497,13 @@ class DASFilterDialog(QDialog):
         candidate = clone_steps(steps, new_identifiers=True)
         if not candidate:
             return False
-        self._start_replay(candidate, description, len(candidate) - 1, commit_after=commit_after)
+        self._start_replay(
+            candidate,
+            description,
+            len(candidate) - 1,
+            commit_after=commit_after,
+            update_draft=True,
+        )
         return True
 
     def _auto_reapply_toggled(self, enabled: bool) -> None:
@@ -1402,6 +1522,8 @@ class DASFilterDialog(QDialog):
         description: str,
         selected_row: int = -1,
         commit_after: bool = False,
+        remember_after: bool = False,
+        update_draft: bool = True,
     ) -> None:
         if self.is_busy():
             return
@@ -1422,6 +1544,8 @@ class DASFilterDialog(QDialog):
         self._pending_description = description
         self._pending_selected_row = selected_row
         self._pending_commit = commit_after
+        self._pending_remember = remember_after
+        self._pending_update_draft = update_draft
         self._set_busy(True)
         self._worker = _PipelineWorker(
             self.raw_data,
@@ -1436,47 +1560,52 @@ class DASFilterDialog(QDialog):
         memory_text = f"预计峰值内存约 {format_bytes(required)}"
         if available is not None:
             memory_text += f"，当前可用约 {format_bytes(available)}"
-        self.status_label.setText(f"正在从原始基线回放 {len(candidate)} 个步骤；{memory_text}……")
+        self._set_status(f"正在从原始数据一次性执行 {len(candidate)} 个步骤；{memory_text}……")
         self.settingsChanged.emit(self.filter_settings())
         self._worker.start()
 
     def _set_busy(self, busy: bool) -> None:
         self._ui_busy = bool(busy)
-        self.apply_button.setEnabled(not busy)
-        self.reset_button.setEnabled(not busy)
-        self.accept_button.setEnabled(not busy)
-        self.cancel_button.setEnabled(not busy)
         self.history_list.setEnabled(not busy)
         self.saved_pipeline_combo.setEnabled(not busy)
         if busy:
+            self.add_step_button.setEnabled(False)
+            self.apply_button.setEnabled(False)
+            self.reset_button.setEnabled(False)
             for button in (
                 self.update_step_button,
                 self.delete_step_button,
                 self.move_up_button,
                 self.move_down_button,
                 self.clear_steps_button,
-                self.reuse_steps_button,
             ):
                 button.setEnabled(False)
         else:
             self._update_history_buttons()
         self._update_saved_pipeline_buttons()
+        self._update_draft_state()
 
     def _replay_finished(self, result) -> None:
-        self.pipeline = FilterPipeline(self._pending_steps)
+        applied_steps = clone_steps(self._pending_steps)
+        if self._pending_update_draft:
+            self.pipeline = FilterPipeline(applied_steps)
         self.working_data = np.asarray(result, dtype=np.float32).copy()
-        self._refresh_history(self._pending_selected_row)
-        self.pipelineChanged.emit(self.pipeline.steps())
-        self.previewReady.emit(self.working_data.copy(), self._pending_description)
+        if self._pending_update_draft:
+            self._refresh_history(self._pending_selected_row)
         if self._pending_commit:
-            self._store_commit()
+            self._store_commit(
+                applied_steps,
+                remember=self._pending_remember,
+                description=self._pending_description,
+            )
         else:
-            self.status_label.setText(
-                f"已从原始基线回放 {len(self.pipeline)} 个步骤：{self._pending_description}。"
+            self.previewReady.emit(self.working_data.copy(), self._pending_description)
+            self._set_status(
+                f"已生成临时结果：{self._pending_description}。"
             )
 
     def _filter_failed(self, details: str) -> None:
-        self.status_label.setText("处理失败，请检查参数、范围或新数据的兼容性。")
+        self._set_status("处理失败，请检查参数、范围或新数据的兼容性；待应用链仍保留。")
         QMessageBox.critical(self, "滤波失败", details.splitlines()[-1])
 
     def _worker_finished(self) -> None:
@@ -1485,39 +1614,91 @@ class DASFilterDialog(QDialog):
         if worker is not None:
             worker.deleteLater()
         self._pending_commit = False
+        self._pending_remember = False
+        self._pending_update_draft = True
         self._set_busy(False)
+
+    def _apply_pipeline(self) -> None:
+        if self.is_busy():
+            return
+        steps = self.pipeline.steps()
+        enabled_count = sum(step.enabled for step in steps)
+        if enabled_count == 0:
+            self._set_status("当前没有启用的滤波步骤；如需显示原始数据，请点击“恢复原始数据”。")
+            return
+        if not self._draft_dirty:
+            self._set_status("当前滤波链已经应用，无需重复计算。")
+            return
+        self._start_replay(
+            steps,
+            f"应用当前滤波链（{enabled_count} 个启用步骤）",
+            self.history_list.currentRow(),
+            commit_after=True,
+            remember_after=True,
+            update_draft=False,
+        )
 
     def _reset(self) -> None:
         if self.is_busy():
             return
-        self._start_replay([], "恢复导入原始数据", -1)
+        if not self.committed_steps:
+            self._set_status("当前已经是原始数据；滤波链配置保持不变。")
+            return
+        self._start_replay(
+            [],
+            "恢复导入原始数据",
+            -1,
+            commit_after=True,
+            remember_after=False,
+            update_draft=False,
+        )
 
-    def _store_commit(self, remember: bool = False) -> None:
-        self.committed_steps = self.pipeline.steps()
+    def restore_original(self) -> None:
+        """Restore the immutable baseline while preserving the editable chain."""
+
+        self._reset()
+
+    def _store_commit(
+        self,
+        steps: Optional[Iterable[FilterStep]] = None,
+        remember: bool = False,
+        description: str = "",
+    ) -> None:
+        self.committed_steps = clone_steps(
+            self.pipeline.steps() if steps is None else steps
+        )
+        self.pipelineChanged.emit(self.committed_steps)
         self.committed.emit(self.working_data.copy())
         self.settingsChanged.emit(self.filter_settings())
-        self.status_label.setText(f"已确认当前结果，共 {len(self.committed_steps)} 个滤波步骤。")
         if remember and self.committed_steps:
             self.pipelineConfirmedByUser.emit(self.committed_steps)
+        if self.committed_steps:
+            enabled_count = sum(step.enabled for step in self.committed_steps)
+            message = f"已从原始数据一次性应用 {enabled_count} 个启用步骤。"
+        else:
+            message = "已恢复原始数据；当前滤波链配置已保留。"
+        if description and self.committed_steps:
+            message = f"{message} {description}。"
+        self._update_draft_state(message)
 
     def _commit_current(self) -> None:
-        if not self.is_busy():
-            self._store_commit(remember=True)
+        """Compatibility alias for the former preview-confirm action."""
+
+        self._apply_pipeline()
 
     def _revert_uncommitted(self) -> None:
         if self.is_busy():
             return
-        self._start_replay(
+        self.set_draft_pipeline(
             self.committed_steps,
-            "撤销未确认修改，恢复最近确认的滤波链",
-            len(self.committed_steps) - 1,
+            "已放弃尚未应用的滤波链修改",
+            new_identifiers=False,
         )
 
     def accept(self) -> None:
         if self.is_busy():
             return
-        self._store_commit(remember=True)
-        self._close_requested()
+        self._apply_pipeline()
 
     def reject(self) -> None:
         self._close_requested()
