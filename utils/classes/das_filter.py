@@ -376,6 +376,41 @@ class _PipelineWorker(QThread):
             self.resultReady.emit(result)
 
 
+class CollapsibleSection(QWidget):
+    """A keyboard-operable, compact section used by the embedded filter tool."""
+
+    def __init__(self, title: str, expanded: bool = True, parent=None):
+        super().__init__(parent)
+        self.setObjectName("filterSection")
+        self.header = QToolButton(text=title)
+        self.header.setObjectName("sectionToggle")
+        self.header.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        self.header.setCheckable(True)
+        self.header.setAccessibleName(f"{title}分组")
+        self.header.setToolTip(f"展开或收起{title}分组")
+        self.header.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+
+        self.content = QWidget()
+        self.content.setObjectName("filterSectionBody")
+        self.content.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        layout.addWidget(self.header)
+        layout.addWidget(self.content)
+
+        self.header.toggled.connect(self.set_expanded)
+        self.header.setChecked(bool(expanded))
+        self.set_expanded(bool(expanded))
+
+    def set_expanded(self, expanded: bool) -> None:
+        self.content.setVisible(bool(expanded))
+        self.header.setArrowType(Qt.DownArrow if expanded else Qt.RightArrow)
+        state = "收起" if expanded else "展开"
+        self.header.setToolTip(f"{state}{self.header.text()}分组")
+
+
 class DASFilterDialog(QDialog):
     """Persistent non-modal editor for an ordered, replayable filter chain."""
 
@@ -473,9 +508,9 @@ class DASFilterDialog(QDialog):
 
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
-        margin = 4 if self.embedded else 8
+        margin = 6 if self.embedded else 8
         root.setContentsMargins(margin, margin, margin, margin)
-        root.setSpacing(4)
+        root.setSpacing(8)
 
         self.scroll_area = QScrollArea()
         self.scroll_area.setWidgetResizable(True)
@@ -485,13 +520,15 @@ class DASFilterDialog(QDialog):
         scroll_content = QWidget()
         content = QVBoxLayout(scroll_content)
         content.setContentsMargins(0, 0, 0, 0)
-        content.setSpacing(4)
+        content.setSpacing(8)
         content.setAlignment(Qt.AlignTop)
         self.scroll_area.setWidget(scroll_content)
         root.addWidget(self.scroll_area, 1)
 
-        algorithm_group = QGroupBox("算法")
-        algorithm_form = QFormLayout(algorithm_group)
+        self.filter_sections = {}
+        algorithm_section = CollapsibleSection("算法", expanded=True)
+        self.filter_sections["algorithm"] = algorithm_section
+        algorithm_form = QFormLayout(algorithm_section.content)
         algorithm_form.setContentsMargins(8, 10, 8, 8)
         algorithm_form.setHorizontalSpacing(6)
         algorithm_form.setVerticalSpacing(2)
@@ -506,11 +543,12 @@ class DASFilterDialog(QDialog):
         backend_label = QLabel(f"基础滤波后端：{backend}")
         backend_label.setObjectName("secondaryLabel")
         algorithm_form.addRow("", backend_label)
-        algorithm_group.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
-        content.addWidget(algorithm_group)
+        algorithm_section.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
+        content.addWidget(algorithm_section)
 
-        range_group = QGroupBox("处理范围（包含起止点）")
-        range_form = QFormLayout(range_group)
+        range_section = CollapsibleSection("处理范围（包含起止点）", expanded=True)
+        self.filter_sections["range"] = range_section
+        range_form = QFormLayout(range_section.content)
         self.range_form = range_form
         range_form.setContentsMargins(8, 10, 8, 8)
         range_form.setHorizontalSpacing(6)
@@ -579,11 +617,12 @@ class DASFilterDialog(QDialog):
         self.sample_to.valueChanged.connect(self._samples_changed)
         self.time_from.valueChanged.connect(self._times_changed)
         self.time_to.valueChanged.connect(self._times_changed)
-        range_group.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
-        content.addWidget(range_group)
+        range_section.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
+        content.addWidget(range_section)
 
-        parameter_group = QGroupBox("算法参数")
-        parameter_form = QFormLayout(parameter_group)
+        parameter_section = CollapsibleSection("算法参数", expanded=True)
+        self.filter_sections["parameters"] = parameter_section
+        parameter_form = QFormLayout(parameter_section.content)
         parameter_form.setContentsMargins(8, 10, 8, 8)
         parameter_form.setHorizontalSpacing(6)
         parameter_form.setVerticalSpacing(2)
@@ -696,11 +735,12 @@ class DASFilterDialog(QDialog):
         self.add_step_button.clicked.connect(self._add_step_to_pipeline)
         add_step_row.addWidget(self.add_step_button)
         parameter_form.addRow("", add_step_row)
-        parameter_group.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
-        content.addWidget(parameter_group)
+        parameter_section.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
+        content.addWidget(parameter_section)
 
-        history_group = QGroupBox("滤波链")
-        history_layout = QVBoxLayout(history_group)
+        history_section = CollapsibleSection("滤波链", expanded=True)
+        self.filter_sections["pipeline"] = history_section
+        history_layout = QVBoxLayout(history_section.content)
         history_layout.setContentsMargins(8, 10, 8, 8)
         history_layout.setSpacing(6)
 
@@ -793,8 +833,8 @@ class DASFilterDialog(QDialog):
         )
         self.auto_reapply_checkbox.toggled.connect(self._auto_reapply_toggled)
         history_layout.addWidget(self.auto_reapply_checkbox)
-        history_group.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
-        content.addWidget(history_group)
+        history_section.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
+        content.addWidget(history_section)
 
         self.status_label = QLabel("先编辑完整滤波链，再点击“应用滤波”一次性计算和绘图。")
         self.status_label.setWordWrap(True)
@@ -802,7 +842,10 @@ class DASFilterDialog(QDialog):
         self.status_label.setObjectName("filterStatusLabel")
         root.addWidget(self.status_label)
 
-        button_row = QHBoxLayout()
+        action_bar = QWidget()
+        action_bar.setObjectName("filterActionBar")
+        button_row = QHBoxLayout(action_bar)
+        button_row.setContentsMargins(6, 6, 6, 6)
         button_row.setSpacing(6)
         self.apply_button = QPushButton("应用滤波")
         self.apply_button.setObjectName("primaryAction")
@@ -813,7 +856,7 @@ class DASFilterDialog(QDialog):
         self.reset_button.clicked.connect(self._reset)
         button_row.addWidget(self.apply_button, 1)
         button_row.addWidget(self.reset_button, 1)
-        root.addLayout(button_row)
+        root.addWidget(action_bar)
 
         self._update_parameter_visibility()
         self._update_range_controls()

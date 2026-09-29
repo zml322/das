@@ -10,8 +10,8 @@ from PyQt5.QtGui import QFont, QFontDatabase, QGuiApplication
 # Use the Windows Chinese UI face when available.  The fallbacks keep source
 # runs usable on systems which do not ship Microsoft's fonts.
 UI_FONT_CANDIDATES = (
-    "Microsoft YaHei UI",
     "Microsoft YaHei",
+    "Microsoft YaHei UI",
     "Segoe UI",
     "Noto Sans CJK SC",
     "Sans Serif",
@@ -22,6 +22,31 @@ SMALL_POINT_SIZE = 9
 PLOT_TITLE_POINT_SIZE = 12
 PLOT_LABEL_POINT_SIZE = 10
 PLOT_TICK_POINT_SIZE = 9
+
+
+# Semantic roles keep the desktop tool visually consistent without tying UI
+# behavior to a colour name.  Plot palettes deliberately stay independent: a
+# scientific colormap communicates data, while these roles communicate UI.
+PALETTE = {
+    "surface_base": "#f4f7fb",
+    "surface_panel": "#ffffff",
+    "surface_subtle": "#f8fafc",
+    "surface_selected": "#eaf1ff",
+    "surface_pressed": "#dce8ff",
+    "text_primary": "#101828",
+    "text_secondary": "#475467",
+    "text_muted": "#7a8699",
+    "border": "#d8dee8",
+    "border_strong": "#c4cedd",
+    "primary": "#2563eb",
+    "primary_hover": "#1d4ed8",
+    "success_text": "#13734a",
+    "success_surface": "#e6f7ef",
+    "warning_text": "#9a5b00",
+    "warning_surface": "#fff3d6",
+    "danger": "#b42318",
+    "danger_surface": "#fef3f2",
+}
 
 
 def ui_font_family() -> str:
@@ -44,7 +69,9 @@ def ui_font(point_size: int = UI_POINT_SIZE) -> QFont:
     """Build a DPI-aware application font at the requested semantic size."""
 
     font = QFont(ui_font_family(), point_size)
-    font.setStyleStrategy(QFont.PreferAntialias)
+    # Full hinting keeps small Chinese UI text crisp on Windows raster displays
+    # while antialiasing preserves the smoother strokes on high-DPI screens.
+    font.setStyleStrategy(QFont.PreferAntialias | QFont.PreferFullHinting)
     return font
 
 
@@ -65,154 +92,174 @@ def plot_html(text: str, point_size: int) -> str:
 
 
 def apply_application_theme(application) -> None:
-    """Apply one compact, DPI-aware typography system to every Qt window."""
+    """Apply the compact, semantic light theme used by every Qt window."""
 
     family = ui_font_family().replace('"', '\\"')
+    colors = PALETTE
     application.setFont(ui_font())
     application.setStyleSheet(
         f'''
-        QWidget {{
-            color: #172033;
-        }}
+        QWidget {{ color: {colors["text_primary"]}; }}
         QMainWindow, QDialog {{
             font-family: "{family}";
             font-size: {UI_POINT_SIZE}pt;
-            background-color: #f3f6fa;
+            background-color: {colors["surface_base"]};
         }}
         QLabel, QCheckBox, QRadioButton {{
-            color: #172033;
+            color: {colors["text_primary"]};
             background-color: transparent;
         }}
         QMenuBar {{
             padding: 4px 8px;
             spacing: 2px;
-            color: #344054;
-            background-color: #f7f9fc;
-            border-bottom: 1px solid #d8dee8;
+            color: {colors["text_secondary"]};
+            background-color: {colors["surface_subtle"]};
+            border-bottom: 1px solid {colors["border"]};
         }}
-        QMenuBar::item {{
-            padding: 6px 10px;
-            border-radius: 6px;
-            background: transparent;
-        }}
+        QMenuBar::item {{ padding: 6px 10px; border-radius: 6px; background: transparent; }}
         QMenuBar::item:selected, QMenuBar::item:pressed {{
-            color: #1d4ed8;
-            background-color: #eaf1ff;
+            color: {colors["primary_hover"]};
+            background-color: {colors["surface_selected"]};
         }}
         QMenu {{
             padding: 5px;
-            color: #344054;
-            background-color: #ffffff;
-            border: 1px solid #d8dee8;
+            color: {colors["text_secondary"]};
+            background-color: {colors["surface_panel"]};
+            border: 1px solid {colors["border"]};
         }}
-        QMenu::item {{
-            padding: 6px 26px 6px 20px;
-            border-radius: 5px;
-        }}
+        QMenu::item {{ padding: 6px 26px 6px 20px; border-radius: 5px; }}
         QMenu::item:selected {{
-            color: #1d4ed8;
-            background-color: #eaf1ff;
+            color: {colors["primary_hover"]};
+            background-color: {colors["surface_selected"]};
         }}
         QStatusBar {{
             font-size: {SMALL_POINT_SIZE}pt;
-            padding: 2px 6px;
-            color: #475467;
-            background-color: #f7f9fc;
-            border-top: 1px solid #d8dee8;
+            padding: 2px 8px;
+            color: {colors["text_secondary"]};
+            background-color: {colors["surface_subtle"]};
+            border-top: 1px solid {colors["border"]};
         }}
+        QSplitter::handle {{ background-color: {colors["border"]}; margin: 4px 0; }}
+        QSplitter::handle:hover {{ background-color: {colors["primary"]}; }}
         QTabWidget::pane {{
-            background-color: #ffffff;
-            border: 1px solid #d8dee8;
+            background-color: {colors["surface_panel"]};
+            border: 1px solid {colors["border"]};
             border-radius: 7px;
             top: -1px;
         }}
         QTabBar::tab {{
-            min-height: 24px;
+            min-height: 25px;
             padding: 7px 14px;
-            color: #667085;
+            color: {colors["text_secondary"]};
             background: transparent;
             border: none;
             border-bottom: 3px solid transparent;
         }}
-        QTabBar::tab:hover {{
-            color: #1d4ed8;
-            background-color: #f4f7fb;
-        }}
+        QTabBar::tab:hover {{ color: {colors["primary_hover"]}; background-color: {colors["surface_base"]}; }}
         QTabBar::tab:selected {{
-            color: #172033;
-            background-color: #ffffff;
-            border-bottom: 3px solid #2563eb;
+            color: {colors["text_primary"]};
+            background-color: {colors["surface_panel"]};
+            border-bottom: 3px solid {colors["primary"]};
         }}
         QPushButton, QComboBox, QSpinBox, QDoubleSpinBox, QDateTimeEdit, QLineEdit {{
-            min-height: 24px;
-            padding: 3px 7px;
-            color: #172033;
-            background-color: #ffffff;
-            border: 1px solid #cfd6e2;
+            min-height: 25px;
+            padding: 3px 8px;
+            color: {colors["text_primary"]};
+            background-color: {colors["surface_panel"]};
+            border: 1px solid {colors["border_strong"]};
             border-radius: 6px;
         }}
         QComboBox:hover, QSpinBox:hover, QDoubleSpinBox:hover,
-        QDateTimeEdit:hover, QLineEdit:hover {{
-            border-color: #8aaaf0;
-        }}
+        QDateTimeEdit:hover, QLineEdit:hover {{ border-color: #8aaaf0; }}
         QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus,
-        QDateTimeEdit:focus, QLineEdit:focus {{
-            border: 1px solid #2563eb;
+        QDateTimeEdit:focus, QLineEdit:focus {{ border: 2px solid {colors["primary"]}; padding: 2px 7px; }}
+        QLineEdit:read-only {{
+            color: {colors["text_primary"]};
+            background-color: {colors["surface_subtle"]};
+            border-color: {colors["border"]};
         }}
         QPushButton:hover {{
-            color: #1d4ed8;
-            border-color: #2563eb;
+            color: {colors["primary_hover"]};
+            border-color: {colors["primary"]};
             background-color: #f7faff;
         }}
-        QPushButton:pressed {{
-            background-color: #eaf1ff;
-        }}
+        QPushButton:pressed {{ background-color: {colors["surface_pressed"]}; }}
+        QPushButton:focus, QToolButton:focus {{ border: 2px solid {colors["primary"]}; }}
         QPushButton:disabled, QComboBox:disabled, QSpinBox:disabled,
         QDoubleSpinBox:disabled, QDateTimeEdit:disabled, QLineEdit:disabled {{
-            color: #98a2b3;
+            color: {colors["text_muted"]};
             background-color: #f2f4f7;
             border-color: #e1e5eb;
         }}
         QPushButton#primaryAction {{
             color: #ffffff;
-            background-color: #2563eb;
-            border-color: #2563eb;
+            background-color: {colors["primary"]};
+            border-color: {colors["primary"]};
             font-weight: 600;
         }}
         QPushButton#primaryAction:hover {{
             color: #ffffff;
-            background-color: #1d4ed8;
-            border-color: #1d4ed8;
+            background-color: {colors["primary_hover"]};
+            border-color: {colors["primary_hover"]};
         }}
         QPushButton#primaryAction:disabled {{
             color: #d0d5dd;
-            background-color: #98a2b3;
-            border-color: #98a2b3;
+            background-color: {colors["text_muted"]};
+            border-color: {colors["text_muted"]};
+        }}
+        QPushButton#dangerAction {{
+            color: {colors["danger"]};
+            background-color: {colors["danger_surface"]};
+            border-color: #fecdca;
         }}
         QToolButton {{
             min-width: 28px;
             min-height: 28px;
             padding: 2px;
-            color: #344054;
-            background-color: #ffffff;
-            border: 1px solid #cfd6e2;
+            color: {colors["text_secondary"]};
+            background-color: {colors["surface_panel"]};
+            border: 1px solid {colors["border_strong"]};
             border-radius: 6px;
         }}
         QToolButton:hover {{
-            color: #1d4ed8;
-            border-color: #2563eb;
+            color: {colors["primary_hover"]};
+            border-color: {colors["primary"]};
             background-color: #f7faff;
         }}
         QToolButton:disabled {{
-            color: #98a2b3;
+            color: {colors["text_muted"]};
             background-color: #f2f4f7;
             border-color: #e1e5eb;
         }}
+        QToolButton#sectionToggle {{
+            min-width: 0;
+            min-height: 30px;
+            padding: 3px 8px;
+            color: {colors["text_primary"]};
+            background-color: {colors["surface_subtle"]};
+            border: 1px solid {colors["border"]};
+            border-radius: 7px;
+            font-weight: 600;
+            text-align: left;
+        }}
+        QToolButton#sectionToggle:checked {{
+            border-bottom-left-radius: 0;
+            border-bottom-right-radius: 0;
+        }}
+        QToolButton#sectionToggle:hover {{ background-color: {colors["surface_selected"]}; }}
+        QToolButton#sectionToggle:focus {{ border: 2px solid {colors["primary"]}; }}
+        QWidget#filterSectionBody {{
+            background-color: {colors["surface_panel"]};
+            border: 1px solid {colors["border"]};
+            border-top: none;
+            border-bottom-left-radius: 7px;
+            border-bottom-right-radius: 7px;
+        }}
         QGroupBox {{
             font-weight: 600;
-            color: #172033;
-            background-color: #f8fafc;
-            border: 1px solid #d8dee8;
+            color: {colors["text_primary"]};
+            background-color: {colors["surface_subtle"]};
+            border: 1px solid {colors["border"]};
             border-radius: 8px;
             margin-top: 16px;
             padding-top: 12px;
@@ -222,58 +269,61 @@ def apply_application_theme(application) -> None:
             subcontrol-position: top left;
             left: 10px;
             padding: 0 5px;
-            color: #172033;
-            background-color: #f8fafc;
+            color: {colors["text_primary"]};
+            background-color: {colors["surface_subtle"]};
         }}
-        QListWidget {{
-            color: #172033;
-            background-color: #ffffff;
-            alternate-background-color: #f8fafc;
-            border: 1px solid #cfd6e2;
+        QTableWidget, QListWidget {{
+            color: {colors["text_primary"]};
+            background-color: {colors["surface_panel"]};
+            alternate-background-color: {colors["surface_subtle"]};
+            border: 1px solid {colors["border_strong"]};
             border-radius: 6px;
             padding: 3px;
         }}
-        QListWidget::item {{
-            padding: 5px 4px;
-            border-radius: 5px;
+        QHeaderView::section {{
+            padding: 5px 6px;
+            color: {colors["text_primary"]};
+            background-color: #eaf1fa;
+            border: none;
+            border-bottom: 1px solid {colors["border"]};
+            font-weight: 600;
         }}
-        QListWidget::item:selected {{
-            color: #172033;
-            background-color: #eaf1ff;
+        QListWidget::item {{ padding: 5px 4px; border-radius: 5px; }}
+        QListWidget::item:selected, QTableWidget::item:selected {{
+            color: {colors["text_primary"]};
+            background-color: {colors["surface_selected"]};
         }}
-        QLabel#secondaryLabel {{
-            color: #667085;
-            font-size: {SMALL_POINT_SIZE}pt;
-        }}
-        QLabel#pipelineStateLabel {{
-            padding: 2px 7px;
-            color: #667085;
+        QLabel#secondaryLabel {{ color: {colors["text_secondary"]}; font-size: {SMALL_POINT_SIZE}pt; }}
+        QLabel#pipelineStateLabel, QLabel#statusBadge {{
+            padding: 3px 8px;
+            color: {colors["text_secondary"]};
             background-color: #eef1f5;
-            border-radius: 8px;
+            border: 1px solid {colors["border"]};
+            border-radius: 9px;
             font-size: {SMALL_POINT_SIZE}pt;
             font-weight: 500;
         }}
         QLabel#pipelineStateLabel[state="pending"] {{
-            color: #9a5b00;
-            background-color: #fff3d6;
+            color: {colors["warning_text"]}; background-color: {colors["warning_surface"]}; border-color: #fedf89;
         }}
-        QLabel#pipelineStateLabel[state="applied"] {{
-            color: #13734a;
-            background-color: #e6f7ef;
+        QLabel#pipelineStateLabel[state="applied"], QLabel#statusBadge[state="active"] {{
+            color: {colors["success_text"]}; background-color: {colors["success_surface"]}; border-color: #abefc6;
         }}
         QLabel#pipelineStateLabel[state="busy"] {{
-            color: #1d4ed8;
-            background-color: #eaf1ff;
+            color: {colors["primary_hover"]}; background-color: {colors["surface_selected"]}; border-color: #b2ccff;
         }}
         QLabel#filterStatusLabel {{
             padding: 7px 9px;
-            color: #475467;
-            background-color: #f7f9fc;
-            border: 1px solid #d8dee8;
+            color: {colors["text_secondary"]};
+            background-color: {colors["surface_subtle"]};
+            border: 1px solid {colors["border"]};
             border-radius: 6px;
         }}
-        QLabel#sectionTitle {{
-            font-weight: 600;
+        QWidget#plotToolbar, QWidget#eventRangeBar, QWidget#filterActionBar {{
+            background-color: {colors["surface_subtle"]};
+            border: 1px solid {colors["border"]};
+            border-radius: 7px;
         }}
+        QLabel#sectionTitle {{ color: {colors["text_primary"]}; font-weight: 600; }}
         '''
     )

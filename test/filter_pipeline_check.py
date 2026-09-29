@@ -6,6 +6,7 @@ import os
 import sys
 import tempfile
 import unittest
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
@@ -13,7 +14,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import numpy as np
 from PyQt5.QtCore import QEventLoop, QSettings, QTimer, Qt
-from PyQt5.QtWidgets import QApplication, QMessageBox
+from PyQt5.QtWidgets import QApplication, QDoubleSpinBox, QMessageBox
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -243,8 +244,26 @@ class FilterPipelineChecks(unittest.TestCase):
         self.assertFalse(hasattr(dialog, "close_button"))
         self.assertFalse(hasattr(dialog, "reuse_steps_button"))
         self.assertEqual(dialog.history_list.horizontalScrollBar().maximum(), 0)
-        self.assertEqual(window.overview_form.verticalSpacing(), 2)
+        self.assertEqual(window.overview_form.verticalSpacing(), 4)
         self.assertEqual(window.gps_from_line_edit.maximumHeight(), 28)
+        self.assertEqual(window.gps_from_line_edit.objectName(), "metadataValue")
+        self.assertEqual(window.sidebar_tabs.minimumWidth(), 320)
+        self.assertEqual(window.data_sidebar_widget.layout().spacing(), 12)
+        self.assertEqual(window.plot_toolbar.layout().count(), 3)
+        self.assertTrue(window.event_markers_visible_checkbox.isChecked())
+        self.assertIsInstance(window.time_correction_spin_box, QDoubleSpinBox)
+        self.assertEqual(set(dialog.filter_sections), {"algorithm", "range", "parameters", "pipeline"})
+        range_section = dialog.filter_sections["range"]
+        self.assertTrue(range_section.header.isChecked())
+        range_section.header.click()
+        QApplication.processEvents()
+        self.assertFalse(range_section.header.isChecked())
+        self.assertTrue(range_section.content.isHidden())
+        self.assertEqual(dialog._selected_range(), (1, 4, 1, 200))
+        range_section.header.click()
+        QApplication.processEvents()
+        self.assertTrue(range_section.header.isChecked())
+        self.assertFalse(range_section.content.isHidden())
         window.showDASFilterDialog()
         self.assertIs(window.das_filter_dialog, dialog)
 
@@ -390,6 +409,32 @@ class FilterPipelineChecks(unittest.TestCase):
             self.assertEqual(visual["region"].hoverBrush.color().alpha(), 0)
             self.assertEqual(visual["region"].lines[0].pen.width(), 3)
             self.assertEqual(visual["region"].lines[1].pen.width(), 3)
+            self.assertEqual(visual["region"].zValue(), 30)
+        visible_range_before_toggle = (window.sampling_times_from_num, window.sampling_times_to_num)
+        window.event_markers_visible_checkbox.setChecked(False)
+        QApplication.processEvents()
+        self.assertEqual(
+            (window.sampling_times_from_num, window.sampling_times_to_num),
+            visible_range_before_toggle,
+        )
+        self.assertTrue(all(
+            plot_widget._event_range_visual is None
+            for plot_widget in (
+                window.plot_gray_scale_widget,
+                window.plot_single_channel_time_widget,
+                window.plot_multi_waves_widget,
+            )
+        ))
+        window.event_markers_visible_checkbox.setChecked(True)
+        QApplication.processEvents()
+        self.assertTrue(all(
+            plot_widget._event_range_visual["region"].zValue() == 30
+            for plot_widget in (
+                window.plot_gray_scale_widget,
+                window.plot_single_channel_time_widget,
+                window.plot_multi_waves_widget,
+            )
+        ))
         window.viewEventRange()
         self.assertEqual((window.sampling_times_from_num, window.sampling_times_to_num), (26, 175))
         self.assertEqual(window.gps_from_line_edit.text(), "2026-08-26 16:54:30.925")
@@ -404,6 +449,45 @@ class FilterPipelineChecks(unittest.TestCase):
         self.assertEqual(window.gps_from_line_edit.text(), "2026-08-26 16:54:30.900")
         self.assertEqual(window.gps_to_line_edit.text(), "2026-08-26 16:54:31.100")
         window.deleteLater()
+
+    def test_sidebar_time_correction_requires_explicit_apply_and_persists(self):
+        with tempfile.TemporaryDirectory(prefix="dasviewer-time-correction-") as directory:
+            settings_path = str(Path(directory) / "settings.ini")
+            preferences = AppPreferences(QSettings(settings_path, QSettings.IniFormat))
+            window = MainWindow(preferences=preferences)
+            raw = np.arange(400, dtype=np.float32).reshape(4, 100)
+            window.raw_data = raw.copy()
+            window.raw_data.setflags(write=False)
+            window.origin_data = raw.copy()
+            window.sampling_rate = 1000.0
+            window.channels_num = 4
+            window.sampling_times = 100
+            window.data_group = DataGroup.from_files(
+                [r"D:\data\ch1_2026-08-26-16-54-19_2.bin"],
+                [100],
+                4,
+                1000,
+            )
+            window._source_time_headers = [[2026, 8, 26, 16, 54, 19]]
+            window.initLocalParams()
+            window.rebuildDataTimeline()
+            window.updateDataRange()
+            window.updateDataParams()
+            window.updateDataGPSTime()
+
+            previous = window.time_correction_seconds
+            window.time_correction_spin_box.setValue(7.5)
+            self.assertEqual(window.time_correction_seconds, previous)
+            window.time_correction_apply_button.click()
+
+            self.assertEqual(window.time_correction_seconds, 7.5)
+            self.assertEqual(preferences.time_correction_seconds(), 7.5)
+            self.assertEqual(window.time_correction_spin_box.value(), 7.5)
+            self.assertEqual(
+                window.data_timeline.segments[0].corrected_recorded_end,
+                datetime(2026, 8, 26, 16, 54, 26, 500000),
+            )
+            window.deleteLater()
 
     def test_file_table_selection_waits_for_explicit_confirmation(self):
         with tempfile.TemporaryDirectory(prefix="dasviewer-selection-") as directory:

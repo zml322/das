@@ -16,7 +16,7 @@ from PyQt5.QtCore import Qt, QUrl, QEvent, QRectF, QTimer, QDateTime
 from PyQt5.QtGui import QBrush, QColor, QPen
 from PyQt5.QtWidgets import QApplication, QMainWindow, QFileDialog, qApp, QTabWidget, QTableWidget, QAbstractItemView, \
     QTableWidgetItem, QHeaderView, QTabBar, QScrollBar, QHBoxLayout, QDoubleSpinBox, QSplitter, QVBoxLayout, QWidget, \
-    QFormLayout, QGroupBox, QListWidget, QListWidgetItem, QGraphicsRectItem, QDateTimeEdit
+    QFormLayout, QGroupBox, QListWidget, QListWidgetItem, QGraphicsRectItem, QDateTimeEdit, QCheckBox, QSizePolicy
 from matplotlib import pyplot as plt
 from scipy.integrate import cumulative_trapezoid
 
@@ -514,7 +514,7 @@ class MainWindow(QMainWindow):
         file_hbox = QHBoxLayout()
         file_area_vbox = QVBoxLayout()
         file_area_vbox.setContentsMargins(0, 0, 0, 0)
-        file_area_vbox.setSpacing(8)
+        file_area_vbox.setSpacing(12)
 
         self.file_path_line_edit = LineEdit(focus=False)
         self.file_path_line_edit.setPlaceholderText('选择数据文件夹')
@@ -526,7 +526,7 @@ class MainWindow(QMainWindow):
         change_file_path_button.clicked.connect(self.changeFilePath)
 
         file_table_scrollbar = QScrollBar(Qt.Vertical)
-        file_table_scrollbar.setStyleSheet('min-height: 100')  # 设置滚动滑块的最小高度
+        file_table_scrollbar.setMinimumHeight(100)
         self.files_table_widget = QTableWidget(30, 1)
         self.files_table_widget.setVerticalScrollBar(file_table_scrollbar)
         self.files_table_widget.setEditTriggers(QAbstractItemView.NoEditTriggers)  # 设置表格不可编辑
@@ -545,7 +545,7 @@ class MainWindow(QMainWindow):
 
         self.pending_file_selection_label = Label('待拼接：请选择文件')
         self.pending_file_selection_label.setWordWrap(True)
-        self.pending_file_selection_label.setStyleSheet('color: #555;')
+        self.pending_file_selection_label.setObjectName('secondaryLabel')
         self.load_selected_files_button = PushButton('确定加载并拼接')
         self.load_selected_files_button.setEnabled(False)
         self.load_selected_files_button.setToolTip('按文件表中的顺序一次性读取、拼接并绘制所选文件')
@@ -579,32 +579,50 @@ class MainWindow(QMainWindow):
         self.current_channels_line_edit = LineEditWithReg(focus=False)
         self.gps_from_line_edit = LineEdit(focus=False)
         self.gps_to_line_edit = LineEdit(focus=False)
-        self.time_correction_line_edit = LineEdit(focus=False)
+        self.time_correction_spin_box = QDoubleSpinBox()
+        self.time_correction_spin_box.setRange(-86400.0, 86400.0)
+        self.time_correction_spin_box.setDecimals(3)
+        self.time_correction_spin_box.setSingleStep(0.1)
+        self.time_correction_spin_box.setSuffix(' s')
+        self.time_correction_spin_box.setKeyboardTracking(False)
+        self.time_correction_spin_box.setValue(self.time_correction_seconds)
+        self.time_correction_spin_box.setToolTip(
+            '设备时间落后真实时间时填正数；例如落后 12 秒填写 +12.000 s'
+        )
+        self.time_correction_apply_button = PushButton('应用')
+        self.time_correction_apply_button.setObjectName('timeCorrectionApplyButton')
+        self.time_correction_apply_button.setToolTip('保存时间修正，并重新计算显示中的推算时间')
+        self.time_correction_apply_button.clicked.connect(self.applyTimeCorrectionFromSidebar)
+        time_correction_controls = QWidget()
+        time_correction_layout = QHBoxLayout(time_correction_controls)
+        time_correction_layout.setContentsMargins(0, 0, 0, 0)
+        time_correction_layout.setSpacing(6)
+        time_correction_layout.addWidget(self.time_correction_spin_box, 1)
+        time_correction_layout.addWidget(self.time_correction_apply_button)
         for field in (
                 self.sampling_rate_line_edit,
                 self.current_sampling_times_line_edit,
                 self.current_channels_line_edit,
                 self.gps_from_line_edit,
                 self.gps_to_line_edit,
-                self.time_correction_line_edit,
         ):
             field.setReadOnly(True)
             field.setFixedHeight(28)
-            field.setStyleSheet('QLineEdit { min-height: 0; padding: 1px 4px; }')
+            field.setObjectName('metadataValue')
 
         self.overview_group = QGroupBox('数据概览')
+        self.overview_group.setObjectName('dataOverview')
         self.overview_form = QFormLayout()
         self.overview_form.setContentsMargins(6, 4, 6, 4)
         self.overview_form.setHorizontalSpacing(6)
-        self.overview_form.setVerticalSpacing(2)
+        self.overview_form.setVerticalSpacing(4)
         self.overview_form.addRow('采样率', self.sampling_rate_line_edit)
         self.overview_form.addRow('采样次数', self.current_sampling_times_line_edit)
         self.overview_form.addRow('通道数', self.current_channels_line_edit)
         self.overview_form.addRow('当前推算开始时间', self.gps_from_line_edit)
         self.overview_form.addRow('当前推算结束时间', self.gps_to_line_edit)
-        self.overview_form.addRow('设备时间修正', self.time_correction_line_edit)
+        self.overview_form.addRow('设备时间修正', time_correction_controls)
         self.overview_group.setLayout(self.overview_form)
-        self.overview_group.setStyleSheet('QGroupBox { margin-top: 6px; padding-top: 4px; }')
         file_area_vbox.addWidget(self.overview_group)
 
         # 单通道操作只在“单通道”页中显示。
@@ -647,17 +665,18 @@ class MainWindow(QMainWindow):
         self.image_colormap_combx.addItems(['灰度', 'RdBu', 'viridis', 'plasma', 'inferno', 'magma', 'turbo',
                                             'jet', 'seismic', 'coolwarm'])
         self.image_colormap_combx.setCurrentText(self.image_colormap)
+        self.image_colormap_combx.setFixedWidth(100)
         self.image_colormap_combx.currentTextChanged.connect(self.updateImageColorParams)
 
         image_level_min_label = Label('最小值(%)')
         self.image_level_min_line_edit = LineEdit()
-        self.image_level_min_line_edit.setFixedWidth(90)
+        self.image_level_min_line_edit.setFixedWidth(76)
         self.image_level_min_line_edit.setPlaceholderText('自动')
         self.image_level_min_line_edit.setToolTip('相对于当前图像最大绝对值的百分比，例如 -80')
 
         image_level_max_label = Label('最大值(%)')
         self.image_level_max_line_edit = LineEdit()
-        self.image_level_max_line_edit.setFixedWidth(90)
+        self.image_level_max_line_edit.setFixedWidth(76)
         self.image_level_max_line_edit.setPlaceholderText('自动')
         self.image_level_max_line_edit.setToolTip('相对于当前图像最大绝对值的百分比，例如 80')
 
@@ -668,20 +687,21 @@ class MainWindow(QMainWindow):
         image_apply_button.clicked.connect(self.updateImageColorParams)
 
         image_controls_hbox = QHBoxLayout()
+        image_controls_hbox.setSpacing(4)
         image_controls_hbox.addWidget(image_colormap_label)
         image_controls_hbox.addWidget(self.image_colormap_combx)
-        image_controls_hbox.addSpacing(10)
+        image_controls_hbox.addSpacing(6)
         image_controls_hbox.addWidget(image_level_min_label)
         image_controls_hbox.addWidget(self.image_level_min_line_edit)
-        image_controls_hbox.addSpacing(5)
+        image_controls_hbox.addSpacing(3)
         image_controls_hbox.addWidget(image_level_max_label)
         image_controls_hbox.addWidget(self.image_level_max_line_edit)
-        image_controls_hbox.addSpacing(10)
+        image_controls_hbox.addSpacing(6)
         image_controls_hbox.addWidget(image_auto_button)
         image_controls_hbox.addWidget(image_apply_button)
-        image_controls_hbox.addStretch(1)
 
         speed_ruler_controls_hbox = QHBoxLayout()
+        speed_ruler_controls_hbox.setSpacing(4)
         self.speed_ruler_spacing_spin_box = QDoubleSpinBox()
         self.speed_ruler_spacing_spin_box.setRange(0.001, 1_000_000.0)
         self.speed_ruler_spacing_spin_box.setDecimals(3)
@@ -698,25 +718,35 @@ class MainWindow(QMainWindow):
         self.speed_ruler_remove_button = PushButton('移除速度标尺')
         self.speed_ruler_remove_button.setEnabled(False)
         self.speed_ruler_remove_button.clicked.connect(self.removeSpeedRuler)
-        self.speed_ruler_status_label = Label('速度标尺未添加')
-        self.speed_ruler_status_label.setStyleSheet('color: #555;')
-        self.speed_ruler_status_label.setWordWrap(True)
+        self.speed_ruler_status_label = Label('未添加')
+        self.speed_ruler_status_label.setObjectName('statusBadge')
+        self.speed_ruler_status_label.setProperty('state', 'inactive')
+        self.speed_ruler_status_label.setToolTip('速度标尺未添加')
+        self.speed_ruler_status_label.setWordWrap(False)
+        self.speed_ruler_status_label.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Preferred)
         speed_ruler_controls_hbox.addWidget(Label('车辆速度标尺  dx'))
         speed_ruler_controls_hbox.addWidget(self.speed_ruler_spacing_spin_box)
         speed_ruler_controls_hbox.addWidget(self.speed_ruler_reset_button)
         speed_ruler_controls_hbox.addWidget(self.speed_ruler_remove_button)
-        speed_ruler_controls_hbox.addWidget(self.speed_ruler_status_label, 1)
+        speed_ruler_controls_hbox.addWidget(self.speed_ruler_status_label)
 
         # 绘制灰度图
         self.plot_gray_scale_widget = MyPlotWidget(
-            '灰度图', '推算时间', '通道', check_mouse=False, time_axis=True
+            '', '推算时间', '通道', check_mouse=False, time_axis=True
         )
         self.gray_scale_container = QWidget()
         gray_scale_vbox = QVBoxLayout()
-        gray_scale_vbox.setContentsMargins(6, 6, 6, 6)
-        gray_scale_vbox.setSpacing(6)
-        gray_scale_vbox.addLayout(image_controls_hbox)
-        gray_scale_vbox.addLayout(speed_ruler_controls_hbox)
+        gray_scale_vbox.setContentsMargins(8, 8, 8, 8)
+        gray_scale_vbox.setSpacing(8)
+        self.plot_toolbar = QWidget()
+        self.plot_toolbar.setObjectName('plotToolbar')
+        plot_toolbar_hbox = QHBoxLayout(self.plot_toolbar)
+        plot_toolbar_hbox.setContentsMargins(8, 6, 8, 6)
+        plot_toolbar_hbox.setSpacing(10)
+        plot_toolbar_hbox.addLayout(image_controls_hbox)
+        plot_toolbar_hbox.addLayout(speed_ruler_controls_hbox)
+        plot_toolbar_hbox.addStretch(1)
+        gray_scale_vbox.addWidget(self.plot_toolbar)
         gray_scale_vbox.addWidget(self.plot_gray_scale_widget)
         self.gray_scale_container.setLayout(gray_scale_vbox)
 
@@ -738,6 +768,7 @@ class MainWindow(QMainWindow):
         combine_image_widget.setLayout(image_vbox)
 
         self.tab_widget = QTabWidget()
+        self.tab_widget.setObjectName('workspaceTabs')
         self.tab_widget.setMovable(True)  # 设置tab可移动
         self.tab_widget.setTabsClosable(True)  # 设置tab可关闭
         self.tab_widget.tabCloseRequested[int].connect(self.removeTab)
@@ -750,8 +781,9 @@ class MainWindow(QMainWindow):
         self.tab_widget.tabBar().setTabButton(2, QTabBar.RightSide, None)
 
         self.event_range_widget = QWidget()
+        self.event_range_widget.setObjectName('eventRangeBar')
         event_range_hbox = QHBoxLayout()
-        event_range_hbox.setContentsMargins(6, 4, 6, 4)
+        event_range_hbox.setContentsMargins(8, 5, 8, 5)
         event_range_hbox.setSpacing(6)
         self.event_range_from_edit = QDateTimeEdit()
         self.event_range_to_edit = QDateTimeEdit()
@@ -763,12 +795,16 @@ class MainWindow(QMainWindow):
         self.event_range_set_button = PushButton('设置标记')
         self.event_range_view_button = PushButton('查看此范围')
         self.event_range_reset_button = PushButton('恢复全部')
+        self.event_markers_visible_checkbox = QCheckBox('显示事件标记')
+        self.event_markers_visible_checkbox.setChecked(True)
+        self.event_markers_visible_checkbox.setToolTip('显示或隐藏图中的事件开始、结束标记；不会改变当前查看范围')
         self.event_range_set_button.setToolTip('移动图中的开始/结束竖线，不改变数据查看范围')
         self.event_range_view_button.setToolTip('按竖线范围更新当前视图，不修改导入原始数据')
         self.event_range_reset_button.setToolTip('恢复完整时间视图并把竖线重置到数据两端')
         self.event_range_set_button.clicked.connect(self.setEventRangeFromInputs)
         self.event_range_view_button.clicked.connect(self.viewEventRange)
         self.event_range_reset_button.clicked.connect(self.restoreFullEventRange)
+        self.event_markers_visible_checkbox.toggled.connect(self.setEventMarkersVisible)
         event_range_hbox.addWidget(Label('事件开始'))
         event_range_hbox.addWidget(self.event_range_from_edit)
         event_range_hbox.addWidget(Label('事件结束'))
@@ -776,6 +812,7 @@ class MainWindow(QMainWindow):
         event_range_hbox.addWidget(self.event_range_set_button)
         event_range_hbox.addWidget(self.event_range_view_button)
         event_range_hbox.addWidget(self.event_range_reset_button)
+        event_range_hbox.addWidget(self.event_markers_visible_checkbox)
         event_range_hbox.addStretch(1)
         self.event_range_widget.setLayout(event_range_hbox)
         self.setEventRangeControlsEnabled(False)
@@ -796,11 +833,13 @@ class MainWindow(QMainWindow):
         self.filter_sidebar_placeholder = Label('请先导入 DAS 数据，再打开二维滤波页。')
         self.filter_sidebar_placeholder.setAlignment(Qt.AlignCenter)
         self.filter_sidebar_placeholder.setWordWrap(True)
-        self.filter_sidebar_placeholder.setStyleSheet('color: #666; padding: 16px;')
+        self.filter_sidebar_placeholder.setObjectName('secondaryLabel')
+        self.filter_sidebar_placeholder.setContentsMargins(16, 16, 16, 16)
         self.filter_sidebar_layout.addWidget(self.filter_sidebar_placeholder)
 
         self.sidebar_tabs = QTabWidget()
-        self.sidebar_tabs.setMinimumWidth(420)
+        self.sidebar_tabs.setObjectName('sidebarTabs')
+        self.sidebar_tabs.setMinimumWidth(320)
         self.sidebar_tabs.addTab(self.data_sidebar_widget, '数据')
         self.sidebar_tabs.addTab(self.filter_sidebar_widget, '二维滤波')
         self.sidebar_tabs.currentChanged.connect(self._sidebarTabChanged)
@@ -816,7 +855,7 @@ class MainWindow(QMainWindow):
         self.main_splitter.addWidget(content_widget)
         self.main_splitter.setStretchFactor(0, 0)
         self.main_splitter.setStretchFactor(1, 1)
-        self.main_splitter.setSizes([460, 1000])
+        self.main_splitter.setSizes([330, 1130])
 
         main_window_hbox.addWidget(self.main_splitter)
         main_window_widget.setLayout(main_window_hbox)
@@ -1049,7 +1088,10 @@ class MainWindow(QMainWindow):
             self.data_timeline.start_time if self.data_timeline is not None else None
         )
         title = '灰度图' if self.image_colormap == '灰度' else f'彩色图 - {self.image_colormap}'
-        self.plot_gray_scale_widget.setTitle(plot_html(title, PLOT_TITLE_POINT_SIZE))
+        # The active workspace tab already identifies this view.  Leaving the
+        # canvas title empty prevents the same label appearing three times and
+        # returns useful vertical space to the data image.
+        self.plot_gray_scale_widget.setTitle('')
         self.tab_widget.setTabText(0, title)
 
         item = pg.ImageItem()
@@ -1308,6 +1350,7 @@ class MainWindow(QMainWindow):
             self.event_range_set_button,
             self.event_range_view_button,
             self.event_range_reset_button,
+            self.event_markers_visible_checkbox,
         ):
             widget.setEnabled(bool(enabled))
 
@@ -1389,10 +1432,30 @@ class MainWindow(QMainWindow):
         value = self.data_timeline.absolute_time_for_sample(sample_boundary)
         return f'{prefix} {value.strftime("%H:%M:%S.%f")[:-3]}'
 
+    def setEventMarkersVisible(self, visible: bool):
+        """Show or hide only the event overlay, without changing the data view."""
+
+        self.show_event_markers = bool(visible)
+        live_widgets = []
+        for plot_widget in list(self._event_range_plot_widgets):
+            try:
+                visual = getattr(plot_widget, '_event_range_visual', None)
+                if visual is not None:
+                    plot_widget.removeItem(visual['region'])
+                plot_widget._event_range_visual = None
+                if self.show_event_markers and self.data_timeline is not None and \
+                        hasattr(self, 'event_range_start_sample'):
+                    self.drawEventRange(plot_widget)
+                live_widgets.append(plot_widget)
+            except RuntimeError:
+                continue
+        self._event_range_plot_widgets = live_widgets
+
     def drawEventRange(self, plot_widget):
         """Draw two synchronized draggable time markers without obscuring the data."""
 
-        if self.data_timeline is None or not hasattr(self, 'event_range_start_sample'):
+        if not getattr(self, 'show_event_markers', True) or \
+                self.data_timeline is None or not hasattr(self, 'event_range_start_sample'):
             plot_widget._event_range_visual = None
             return
         start_seconds = self.event_range_start_sample / self.sampling_rate
@@ -1406,7 +1469,9 @@ class MainWindow(QMainWindow):
             bounds=(0.0, self.sampling_times / self.sampling_rate),
             swapMode='sort',
         )
-        region.setZValue(16)
+        # File strips occupy layers 19-21.  Keep event markers and their
+        # labels higher so the end marker remains readable at the top edge.
+        region.setZValue(30)
         start_pen = pg.mkPen('#16a34a', width=3)
         end_pen = pg.mkPen('#dc2626', width=3)
         region.lines[0].setPen(start_pen)
@@ -1429,6 +1494,8 @@ class MainWindow(QMainWindow):
             fill=pg.mkBrush(255, 255, 255, 205),
             movable=True,
         )
+        start_label.setZValue(1)
+        end_label.setZValue(1)
         region.sigRegionChangeFinished.connect(lambda item=region: self._eventRangeMoved(item))
         plot_widget.addItem(region)
         plot_widget._event_range_visual = {
@@ -1591,13 +1658,22 @@ class MainWindow(QMainWindow):
         self.tab_widget.setCurrentWidget(self.gray_scale_container)
         self.updateSpeedRulerButtons()
 
+    def _setSpeedRulerStatus(self, text: str, detail: str, state: str) -> None:
+        """Keep the toolbar status compact while retaining the full measurement."""
+
+        self.speed_ruler_status_label.setText(text)
+        self.speed_ruler_status_label.setToolTip(detail)
+        self.speed_ruler_status_label.setProperty('state', state)
+        self.speed_ruler_status_label.style().unpolish(self.speed_ruler_status_label)
+        self.speed_ruler_status_label.style().polish(self.speed_ruler_status_label)
+
     def removeSpeedRuler(self):
         """Remove only the manual overlay; never modify DAS or trajectory data."""
 
         self.speed_ruler_active = False
         self.speed_ruler_points = None
         self._removeSpeedRulerGraphics()
-        self.speed_ruler_status_label.setText('速度标尺未添加')
+        self._setSpeedRulerStatus('未添加', '速度标尺未添加', 'inactive')
         self.updateSpeedRulerButtons()
 
     def _removeSpeedRulerGraphics(self):
@@ -1643,9 +1719,14 @@ class MainWindow(QMainWindow):
             self.speed_ruler_points[1],
             self.speed_ruler_channel_spacing,
         )
-        self.speed_ruler_status_label.setText(
-            format_speed_measurement(measurement).replace('\n', '  |  ')
-        )
+        detail = format_speed_measurement(measurement)
+        if measurement.valid:
+            text = f'{measurement.speed_mps:.2f} m/s · {measurement.direction_text}'
+            state = 'active'
+        else:
+            text = '无法测量'
+            state = 'inactive'
+        self._setSpeedRulerStatus(text, detail, state)
 
     def updateSpeedRulerChannelSpacing(self, value: float):
         """Recalculate the active ruler when the real adjacent-channel spacing changes."""
@@ -1984,13 +2065,24 @@ class MainWindow(QMainWindow):
         self.current_sampling_times_line_edit.setText(str(self.current_sampling_times))
         self.current_channels_line_edit.setText(str(self.current_channels))
 
+    def _syncTimeCorrectionSpinBox(self):
+        """Reflect the saved correction in the editable sidebar control."""
+
+        if not hasattr(self, 'time_correction_spin_box'):
+            return
+        self.time_correction_spin_box.blockSignals(True)
+        try:
+            self.time_correction_spin_box.setValue(self.time_correction_seconds)
+        finally:
+            self.time_correction_spin_box.blockSignals(False)
+
     def updateDataGPSTime(self):
         """Update corrected inferred times for the current visible sample range."""
 
+        self._syncTimeCorrectionSpinBox()
         if self.data_timeline is None:
             self.gps_from_line_edit.clear()
             self.gps_to_line_edit.clear()
-            self.time_correction_line_edit.setText(f'{self.time_correction_seconds:+.3f} s')
             self.setEventRangeControlsEnabled(False)
             return
         start_sample = 0
@@ -2002,9 +2094,6 @@ class MainWindow(QMainWindow):
         visible_end = self.data_timeline.absolute_time_for_sample(end_sample)
         self.gps_from_line_edit.setText(format_wall_time(visible_start))
         self.gps_to_line_edit.setText(format_wall_time(visible_end))
-        self.time_correction_line_edit.setText(
-            f'{self.time_correction_seconds:+.3f} s（记录时间 + 修正）'
-        )
         self.plot_gray_scale_widget.setTimeOrigin(self.data_timeline.start_time)
         self.plot_single_channel_time_widget.setTimeOrigin(self.data_timeline.start_time)
         self.multi_waves_time_axis.setOrigin(self.data_timeline.start_time)
@@ -2359,6 +2448,26 @@ class MainWindow(QMainWindow):
     # """------------------------------------------------------------------------------------------------------------"""
     """操作-查看数据（时间）调用函数"""
 
+    def applyTimeCorrectionFromSidebar(self):
+        """Persist the sidebar value only after its explicit Apply action."""
+
+        self.setTimeCorrectionSeconds(self.time_correction_spin_box.value())
+
+    def setTimeCorrectionSeconds(self, correction_seconds: float):
+        """Persist a correction and refresh all corrected-time dependent views."""
+
+        self.time_correction_seconds = float(correction_seconds)
+        self.preferences.set_time_correction_seconds(self.time_correction_seconds)
+        self.rebuildDataTimeline()
+        self.updateDataGPSTime()
+        self.updateStitchedFilesList()
+        if hasattr(self, 'data'):
+            self.updateImages()
+        self.statusBar().showMessage(
+            f'时间修正已保存：记录时间 {self.time_correction_seconds:+.3f} s。',
+            8000,
+        )
+
     def showTimeCorrectionDialog(self):
         """Edit and persist the correction added to device-recorded end times."""
 
@@ -2382,17 +2491,7 @@ class MainWindow(QMainWindow):
         cancel_button = PushButton('取消')
 
         def save():
-            self.time_correction_seconds = float(correction.value())
-            self.preferences.set_time_correction_seconds(self.time_correction_seconds)
-            self.rebuildDataTimeline()
-            self.updateDataGPSTime()
-            self.updateStitchedFilesList()
-            if hasattr(self, 'data'):
-                self.updateImages()
-            self.statusBar().showMessage(
-                f'时间修正已保存：记录时间 {self.time_correction_seconds:+.3f} s。',
-                8000,
-            )
+            self.setTimeCorrectionSeconds(correction.value())
             dialog.accept()
 
         save_button.clicked.connect(save)
