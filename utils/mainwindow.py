@@ -12,11 +12,17 @@ from datetime import datetime
 
 import pandas as pd
 from PyQt5 import QtMultimedia
+try:
+
+    from PyQt5.QtMultimediaWidgets import QVideoWidget
+except ImportError:  # Keep the viewer usable on minimal PyQt installations.
+    QVideoWidget = None
 from PyQt5.QtCore import Qt, QUrl, QEvent, QRectF, QTimer, QDateTime
 from PyQt5.QtGui import QBrush, QColor, QPen
 from PyQt5.QtWidgets import QApplication, QMainWindow, QFileDialog, qApp, QTabWidget, QTableWidget, QAbstractItemView, \
     QTableWidgetItem, QHeaderView, QTabBar, QScrollBar, QHBoxLayout, QDoubleSpinBox, QSplitter, QVBoxLayout, QWidget, \
-    QFormLayout, QGroupBox, QListWidget, QListWidgetItem, QGraphicsRectItem, QDateTimeEdit, QCheckBox, QSizePolicy
+    QFormLayout, QGroupBox, QListWidget, QListWidgetItem, QGraphicsRectItem, QDateTimeEdit, QCheckBox, QSizePolicy, QSlider, \
+    QProgressDialog
 from matplotlib import pyplot as plt
 from scipy.integrate import cumulative_trapezoid
 
@@ -42,6 +48,13 @@ from .classes.snr import SNRCalculator
 from .classes.spectrum import SpectrumHandler
 from .classes.speed_ruler import SpeedRulerROI, calculate_projected_speed, format_speed_measurement
 from .classes.vehicle_tracking_dialog import VehicleTrackingDialog
+from .classes.video_annotation import (
+    AnnotationProject,
+    format_video_position,
+    parse_video_start_time,
+    trajectory_candidates,
+    trajectory_crossing_time,
+)
 from .classes.wavelet import DWTHandler, CWTHandler
 from .classes.wavelet_packet import DWPTHandler
 from .bin_reader import bin2numpy, read_bin_header
@@ -50,6 +63,9 @@ from .preferences import AppPreferences
 from .theme import PLOT_LABEL_POINT_SIZE, PLOT_TICK_POINT_SIZE, PLOT_TITLE_POINT_SIZE, plot_font, plot_html, ui_font_family
 from .widget import *
 from .version import __version__
+
+
+VIDEO_SEQUENCE_MAX_DISPLAY_SAMPLES = 60_000
 
 
 class FileSegmentBarItem(QGraphicsRectItem):
@@ -177,6 +193,28 @@ class MainWindow(QMainWindow):
         self.speed_ruler_active = False
         self.speed_ruler_points = None
         self.speed_ruler_roi = None
+        # Video comparison is a project-sidecar workflow.  It intentionally
+        # never changes the imported DAS array, its filter chain, or video.
+        self.video_annotation_project = AnnotationProject()
+        self.video_annotation_context_matches = True
+        self.video_annotation_selected_id = None
+        self.video_annotation_interval_start_ms = None
+        self.video_annotation_dirty = False
+        self._video_slider_dragging = False
+        self._last_video_playhead_update_ms = -1000
+        self.video_player = None
+        self.video_playhead_line = None
+        self.video_camera_line = None
+        self._video_annotation_items = []
+        self._video_trajectory_candidates = {}
+        # A long recording is visualized from a decimated, read-only sequence.
+        # The normal DAS workspace keeps its own full-resolution loaded array.
+        self.video_sequence_data_group = None
+        self.video_sequence_timeline = None
+        self.video_sequence_display_data = None
+        self.video_sequence_display_stride = 1
+        self.video_sequence_source_paths = []
+        self.video_sequence_selected_segment_index = None
 
         # 二值图
         self.binary_image = None
@@ -550,6 +588,13 @@ class MainWindow(QMainWindow):
         self.load_selected_files_button.setEnabled(False)
         self.load_selected_files_button.setToolTip('按文件表中的顺序一次性读取、拼接并绘制所选文件')
         self.load_selected_files_button.clicked.connect(self.selectDataFromTable)
+        self.video_sequence_load_checkbox = QCheckBox('视频连续：选起始文件后自动读取后续文件')
+        self.video_sequence_load_checkbox.setChecked(True)
+        self.video_sequence_load_checkbox.setToolTip(
+            '仅选中一个文件时生效：按文件名顺序读取它及后续文件，'
+            '长录像只保留抽稀后的 DAS 概览，避免占满内存。多选时仍按所选文件普通拼接。'
+        )
+        self.video_sequence_load_checkbox.toggled.connect(self.updatePendingFileSelection)
 
         # 文件区布局
         file_hbox.addWidget(self.file_path_line_edit)
@@ -557,6 +602,7 @@ class MainWindow(QMainWindow):
         file_area_vbox.addLayout(file_hbox)
         file_area_vbox.addWidget(self.files_table_widget, 1)
         file_area_vbox.addWidget(self.pending_file_selection_label)
+        file_area_vbox.addWidget(self.video_sequence_load_checkbox)
         file_area_vbox.addWidget(self.load_selected_files_button)
 
         self.stitched_files_group = QGroupBox('当前拼接文件（0）')
@@ -776,9 +822,12 @@ class MainWindow(QMainWindow):
         self.tab_widget.addTab(combine_image_widget, '单通道')
         self.initMultiWavesTab()
         self.tab_widget.addTab(self.multi_waves_container, '多通道云图')
+        self.initVideoComparisonTab()
+        self.tab_widget.addTab(self.video_compare_container, '视频对照')
         self.tab_widget.tabBar().setTabButton(0, QTabBar.RightSide, None)
         self.tab_widget.tabBar().setTabButton(1, QTabBar.RightSide, None)  # 设置删除按钮消失
         self.tab_widget.tabBar().setTabButton(2, QTabBar.RightSide, None)
+        self.tab_widget.tabBar().setTabButton(3, QTabBar.RightSide, None)
 
         self.event_range_widget = QWidget()
         self.event_range_widget.setObjectName('eventRangeBar')
@@ -842,6 +891,7 @@ class MainWindow(QMainWindow):
         self.sidebar_tabs.setMinimumWidth(320)
         self.sidebar_tabs.addTab(self.data_sidebar_widget, '数据')
         self.sidebar_tabs.addTab(self.filter_sidebar_widget, '二维滤波')
+        self.sidebar_tabs.addTab(self.annotation_sidebar_widget, '标注')
         self.sidebar_tabs.currentChanged.connect(self._sidebarTabChanged)
 
         content_widget = QWidget()
@@ -956,6 +1006,1008 @@ class MainWindow(QMainWindow):
         self.multi_waves_colors = ['red', 'lime', 'deepskyblue', 'yellow', 'plum', 'gold', 'blue', 'fuchsia',
                                    'aqua', 'orange']
 
+    def initVideoComparisonTab(self):
+        """Create the persistent camera-above-DAS comparison workspace."""
+
+        self.video_compare_container = QWidget()
+        root = QVBoxLayout(self.video_compare_container)
+        root.setContentsMargins(6, 6, 6, 6)
+        root.setSpacing(6)
+
+        self.video_das_splitter = QSplitter(Qt.Vertical)
+        self.video_das_splitter.setChildrenCollapsible(False)
+        self.video_das_splitter.setHandleWidth(7)
+
+        video_panel = QWidget()
+        video_layout = QVBoxLayout(video_panel)
+        video_layout.setContentsMargins(8, 8, 8, 8)
+        video_layout.setSpacing(6)
+        self.video_source_label = Label('未载入摄像头视频')
+        self.video_source_label.setObjectName('secondaryLabel')
+        self.video_source_label.setWordWrap(True)
+        video_layout.addWidget(self.video_source_label)
+        if QVideoWidget is None:
+            self.video_surface = Label('当前 PyQt 安装未包含视频画面组件。')
+            self.video_surface.setAlignment(Qt.AlignCenter)
+            self.video_surface.setObjectName('videoUnavailable')
+        else:
+            self.video_surface = QVideoWidget()
+            self.video_surface.setObjectName('videoSurface')
+        self.video_surface.setMinimumHeight(360)
+        self.video_surface.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        video_layout.addWidget(self.video_surface, 1)
+
+        self.video_load_button = PushButton('选择视频')
+        self.video_load_button.setToolTip('选择摄像头录像；不会复制、转码或修改源视频')
+        self.video_play_button = PushButton('播放')
+        self.video_play_button.setObjectName('primaryAction')
+        self.video_back_button = PushButton('−1 s')
+        self.video_forward_button = PushButton('+1 s')
+        self.video_speed_combo = ComboBox()
+        for label, rate in (('0.25×', 0.25), ('0.5×', 0.5), ('1×', 1.0), ('2×', 2.0)):
+            self.video_speed_combo.addItem(label, rate)
+        self.video_speed_combo.setCurrentIndex(2)
+        self.video_position_slider = QSlider(Qt.Horizontal)
+        self.video_position_slider.setRange(0, 0)
+        self.video_position_slider.setAccessibleName('视频播放位置')
+        self.video_time_label = Label('--:--:--.--- / --:--:--.---')
+        self.video_time_label.setMinimumWidth(188)
+        controls = QHBoxLayout()
+        controls.setContentsMargins(0, 0, 0, 0)
+        controls.setSpacing(6)
+        controls.addWidget(self.video_load_button)
+        controls.addWidget(self.video_play_button)
+        controls.addWidget(self.video_back_button)
+        controls.addWidget(self.video_forward_button)
+        controls.addWidget(self.video_speed_combo)
+        controls.addWidget(self.video_position_slider, 1)
+        controls.addWidget(self.video_time_label)
+        video_layout.addLayout(controls)
+
+        self.video_sync_summary_label = Label('对时：等待视频与 DAS 数据')
+        self.video_sync_summary_label.setObjectName('secondaryLabel')
+        video_layout.addWidget(self.video_sync_summary_label)
+        video_panel.setMinimumHeight(460)
+
+        das_panel = QWidget()
+        das_layout = QVBoxLayout(das_panel)
+        das_layout.setContentsMargins(8, 8, 8, 8)
+        das_layout.setSpacing(6)
+        self.video_das_plot_widget = MyPlotWidget('', '推算时间', '通道', check_mouse=False, time_axis=True)
+        self.video_das_plot_widget.setMinimumHeight(260)
+        self.video_camera_channel_spin_box = SpinBox()
+        self.video_camera_channel_spin_box.setRange(1, 1)
+        self.video_camera_channel_spin_box.setKeyboardTracking(False)
+        self.video_camera_channel_apply_button = PushButton('设置通道')
+        self.video_camera_visible_checkbox = QCheckBox('显示摄像头通道线')
+        self.video_camera_visible_checkbox.setChecked(True)
+        self.video_follow_checkbox = QCheckBox('播放时跟随')
+        self.video_follow_checkbox.setChecked(True)
+        self.video_annotations_visible_checkbox = QCheckBox('显示标注')
+        self.video_annotations_visible_checkbox.setChecked(True)
+        self.video_current_das_label = Label('DAS：等待对时')
+        self.video_current_das_label.setObjectName('statusBadge')
+        self.video_sequence_status_label = Label('连续 DAS：未加载')
+        self.video_sequence_status_label.setObjectName('secondaryLabel')
+        das_controls = QHBoxLayout()
+        das_controls.setContentsMargins(0, 0, 0, 0)
+        das_controls.setSpacing(6)
+        das_controls.addWidget(Label('摄像头通道'))
+        das_controls.addWidget(self.video_camera_channel_spin_box)
+        das_controls.addWidget(self.video_camera_channel_apply_button)
+        das_controls.addWidget(self.video_camera_visible_checkbox)
+        das_controls.addSpacing(12)
+        das_controls.addWidget(self.video_follow_checkbox)
+        das_controls.addWidget(self.video_annotations_visible_checkbox)
+        das_controls.addStretch(1)
+        das_controls.addWidget(self.video_sequence_status_label)
+        das_controls.addWidget(self.video_current_das_label)
+        das_layout.addLayout(das_controls)
+        das_layout.addWidget(self.video_das_plot_widget, 1)
+        das_panel.setMinimumHeight(340)
+
+        self.video_das_splitter.addWidget(video_panel)
+        self.video_das_splitter.addWidget(das_panel)
+        self.video_das_splitter.setStretchFactor(0, 1)
+        self.video_das_splitter.setStretchFactor(1, 1)
+        self.video_das_splitter.setSizes([560, 430])
+        root.addWidget(self.video_das_splitter)
+
+        self.video_load_button.clicked.connect(self.chooseVideoComparisonFile)
+        self.video_play_button.clicked.connect(self.toggleVideoPlayback)
+        self.video_back_button.clicked.connect(lambda: self.seekVideoByMilliseconds(-1000))
+        self.video_forward_button.clicked.connect(lambda: self.seekVideoByMilliseconds(1000))
+        self.video_speed_combo.currentIndexChanged.connect(self.setVideoPlaybackRate)
+        self.video_position_slider.sliderPressed.connect(self._videoSliderPressed)
+        self.video_position_slider.sliderReleased.connect(self._videoSliderReleased)
+        self.video_position_slider.sliderMoved.connect(self._videoSliderMoved)
+        self.video_camera_channel_apply_button.clicked.connect(self.applyVideoCameraChannel)
+        self.video_camera_visible_checkbox.toggled.connect(self.setVideoCameraVisible)
+        self.video_annotations_visible_checkbox.toggled.connect(self.setVideoAnnotationsVisible)
+        self.video_das_plot_widget.scene().sigMouseClicked.connect(self._videoDasClicked)
+
+        self._createVideoAnnotationSidebar()
+        if QVideoWidget is not None:
+            self.video_player = QtMultimedia.QMediaPlayer(self)
+            self.video_player.setVideoOutput(self.video_surface)
+            self.video_player.positionChanged.connect(self._videoPositionChanged)
+            self.video_player.durationChanged.connect(self._videoDurationChanged)
+            self.video_player.stateChanged.connect(self._videoStateChanged)
+            self.video_player.mediaStatusChanged.connect(self._videoMediaStatusChanged)
+            self.video_player.error.connect(self._videoPlayerError)
+        else:
+            self.video_play_button.setEnabled(False)
+            self.video_back_button.setEnabled(False)
+            self.video_forward_button.setEnabled(False)
+            self.video_speed_combo.setEnabled(False)
+        self._syncVideoProjectWidgets()
+        self.refreshVideoAnnotationTable()
+
+    def _createVideoAnnotationSidebar(self):
+        """Build compact project, synchronization, and annotation controls."""
+
+        self.annotation_sidebar_widget = QWidget()
+        layout = QVBoxLayout(self.annotation_sidebar_widget)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(10)
+
+        project_group = QGroupBox('标注工程')
+        project_form = QFormLayout(project_group)
+        project_form.setContentsMargins(8, 8, 8, 8)
+        self.annotation_project_label = Label('未保存：标签仅在本次会话保留')
+        self.annotation_project_label.setObjectName('secondaryLabel')
+        self.annotation_project_label.setWordWrap(True)
+        self.annotation_new_button = PushButton('新建')
+        self.annotation_open_button = PushButton('打开')
+        self.annotation_save_button = PushButton('保存')
+        self.annotation_export_button = PushButton('导出 CSV')
+        project_buttons = QWidget()
+        project_buttons_layout = QHBoxLayout(project_buttons)
+        project_buttons_layout.setContentsMargins(0, 0, 0, 0)
+        project_buttons_layout.setSpacing(5)
+        for button in (self.annotation_new_button, self.annotation_open_button,
+                       self.annotation_save_button, self.annotation_export_button):
+            project_buttons_layout.addWidget(button)
+        project_form.addRow(self.annotation_project_label)
+        project_form.addRow(project_buttons)
+        layout.addWidget(project_group)
+
+        sync_group = QGroupBox('视频对时')
+        sync_form = QFormLayout(sync_group)
+        sync_form.setContentsMargins(8, 8, 8, 8)
+        self.video_start_time_edit = QDateTimeEdit()
+        self.video_start_time_edit.setDisplayFormat('yyyy-MM-dd HH:mm:ss.zzz')
+        self.video_start_time_edit.setCalendarPopup(True)
+        self.video_start_time_edit.setKeyboardTracking(False)
+        self.video_sync_offset_spin_box = QDoubleSpinBox()
+        self.video_sync_offset_spin_box.setRange(-3600.0, 3600.0)
+        self.video_sync_offset_spin_box.setDecimals(3)
+        self.video_sync_offset_spin_box.setSingleStep(0.01)
+        self.video_sync_offset_spin_box.setSuffix(' s')
+        self.video_sync_offset_spin_box.setKeyboardTracking(False)
+        self.video_sync_rate_spin_box = QDoubleSpinBox()
+        self.video_sync_rate_spin_box.setRange(0.900000, 1.100000)
+        self.video_sync_rate_spin_box.setDecimals(6)
+        self.video_sync_rate_spin_box.setSingleStep(0.000100)
+        self.video_sync_rate_spin_box.setValue(1.0)
+        self.video_sync_rate_spin_box.setKeyboardTracking(False)
+        self.video_sync_apply_button = PushButton('应用对时')
+        self.video_sync_apply_button.setObjectName('primaryAction')
+        self.video_sync_hint_label = Label(
+            '文件名时间用于初始对时；Ctrl+Shift 点击 DAS 可把当前视频帧钉到该时刻。'
+        )
+        self.video_sync_hint_label.setObjectName('secondaryLabel')
+        self.video_sync_hint_label.setWordWrap(True)
+        sync_form.addRow('视频开始时间', self.video_start_time_edit)
+        sync_form.addRow('手工偏移', self.video_sync_offset_spin_box)
+        sync_form.addRow('时钟倍率', self.video_sync_rate_spin_box)
+        sync_form.addRow(self.video_sync_apply_button)
+        sync_form.addRow(self.video_sync_hint_label)
+        layout.addWidget(sync_group)
+
+        mark_group = QGroupBox('人工标注')
+        mark_form = QFormLayout(mark_group)
+        mark_form.setContentsMargins(8, 8, 8, 8)
+        self.annotation_kind_combo = ComboBox()
+        self.annotation_kind_combo.setEditable(True)
+        self.annotation_kind_combo.addItems(['车辆经过', '进入视野', '离开视野', '多车', '异常', '其他'])
+        self.annotation_outcome_combo = ComboBox()
+        self.annotation_outcome_combo.addItems(['未核对', '确认匹配', '不确定', 'DAS未检测到', '疑似误检'])
+        self.annotation_note_edit = LineEdit()
+        self.annotation_note_edit.setPlaceholderText('可选备注')
+        self.annotation_point_button = PushButton('标记车辆 (T)')
+        self.annotation_point_button.setObjectName('primaryAction')
+        self.annotation_interval_start_button = PushButton('开始区间 (I)')
+        self.annotation_interval_finish_button = PushButton('结束并保存 (O)')
+        self.annotation_interval_finish_button.setEnabled(False)
+        self.annotation_interval_label = Label('未开始区间标注')
+        self.annotation_interval_label.setObjectName('secondaryLabel')
+        self.annotation_trajectory_tolerance_spin_box = QDoubleSpinBox()
+        self.annotation_trajectory_tolerance_spin_box.setRange(0.0, 120.0)
+        self.annotation_trajectory_tolerance_spin_box.setDecimals(3)
+        self.annotation_trajectory_tolerance_spin_box.setValue(2.0)
+        self.annotation_trajectory_tolerance_spin_box.setSuffix(' s')
+        self.annotation_trajectory_combo = ComboBox()
+        self.annotation_trajectory_combo.addItem('不关联轨迹', None)
+        self.annotation_update_button = PushButton('更新选中标注')
+        mark_buttons = QWidget()
+        mark_buttons_layout = QHBoxLayout(mark_buttons)
+        mark_buttons_layout.setContentsMargins(0, 0, 0, 0)
+        mark_buttons_layout.setSpacing(5)
+        mark_buttons_layout.addWidget(self.annotation_point_button)
+        mark_buttons_layout.addWidget(self.annotation_interval_start_button)
+        mark_buttons_layout.addWidget(self.annotation_interval_finish_button)
+        mark_form.addRow('类型', self.annotation_kind_combo)
+        mark_form.addRow('结论', self.annotation_outcome_combo)
+        mark_form.addRow('备注', self.annotation_note_edit)
+        mark_form.addRow(mark_buttons)
+        mark_form.addRow(self.annotation_interval_label)
+        mark_form.addRow('候选窗口', self.annotation_trajectory_tolerance_spin_box)
+        mark_form.addRow('关联轨迹', self.annotation_trajectory_combo)
+        mark_form.addRow(self.annotation_update_button)
+        layout.addWidget(mark_group)
+
+        table_group = QGroupBox('标注列表')
+        table_layout = QVBoxLayout(table_group)
+        table_layout.setContentsMargins(8, 8, 8, 8)
+        self.annotation_table = QTableWidget(0, 7)
+        self.annotation_table.setHorizontalHeaderLabels(
+            ['显', '#', '类型', '视频时间', 'DAS 时间', '轨迹', '结论']
+        )
+        self.annotation_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.annotation_table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.annotation_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.annotation_table.verticalHeader().setVisible(False)
+        self.annotation_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        self.annotation_table.horizontalHeader().setStretchLastSection(True)
+        self.annotation_table.setMinimumHeight(230)
+        table_layout.addWidget(self.annotation_table)
+        self.annotation_delete_button = PushButton('删除选中')
+        self.annotation_delete_button.setObjectName('dangerAction')
+        self.annotation_undo_button = PushButton('撤销最后一条')
+        table_buttons = QHBoxLayout()
+        table_buttons.addWidget(self.annotation_delete_button)
+        table_buttons.addWidget(self.annotation_undo_button)
+        table_buttons.addStretch(1)
+        table_layout.addLayout(table_buttons)
+        layout.addWidget(table_group, 1)
+
+        self.annotation_new_button.clicked.connect(self.newVideoAnnotationProject)
+        self.annotation_open_button.clicked.connect(self.openVideoAnnotationProject)
+        self.annotation_save_button.clicked.connect(self.saveVideoAnnotationProject)
+        self.annotation_export_button.clicked.connect(self.exportVideoAnnotationsCsv)
+        self.video_sync_apply_button.clicked.connect(self.applyVideoSync)
+        self.annotation_point_button.clicked.connect(self.addVideoPointAnnotation)
+        self.annotation_interval_start_button.clicked.connect(self.beginVideoIntervalAnnotation)
+        self.annotation_interval_finish_button.clicked.connect(self.finishVideoIntervalAnnotation)
+        self.annotation_update_button.clicked.connect(self.updateSelectedVideoAnnotation)
+        self.annotation_delete_button.clicked.connect(self.deleteSelectedVideoAnnotation)
+        self.annotation_undo_button.clicked.connect(self.undoLastVideoAnnotation)
+        self.annotation_table.itemSelectionChanged.connect(self._videoAnnotationTableSelectionChanged)
+        self.annotation_table.itemChanged.connect(self._videoAnnotationTableItemChanged)
+
+    # """------------------------------------------------------------------------------------------------------------"""
+    """视频对照、同步与人工标注"""
+
+    def _videoDataContext(self):
+        """Return the long-recording context when one is active for video work."""
+
+        if self.video_sequence_data_group is not None and self.video_sequence_timeline is not None:
+            return self.video_sequence_data_group, self.video_sequence_timeline
+        return self.data_group, self.data_timeline
+
+    def _clearVideoSequenceContext(self):
+        """Return video comparison to the normal, full-resolution data context."""
+
+        self.video_sequence_data_group = None
+        self.video_sequence_timeline = None
+        self.video_sequence_display_data = None
+        self.video_sequence_display_stride = 1
+        self.video_sequence_source_paths = []
+        self.video_sequence_selected_segment_index = None
+        if hasattr(self, 'video_sequence_status_label'):
+            self.video_sequence_status_label.setText('连续 DAS：未加载')
+            self.video_sequence_status_label.setToolTip('')
+
+    def _videoDisplayData(self):
+        if self.video_sequence_display_data is not None:
+            return self.video_sequence_display_data
+        return getattr(self, 'data', None)
+
+    def _videoChannelBounds(self):
+        group, _timeline = self._videoDataContext()
+        if self.video_sequence_data_group is not None and group is not None:
+            return 1, int(group.channel_count)
+        if not hasattr(self, 'channel_from_num') or not hasattr(self, 'channel_to_num'):
+            return 1, 1
+        return int(self.channel_from_num), int(self.channel_to_num)
+
+    def _annotationTimeline(self):
+        _group, timeline = self._videoDataContext()
+        if timeline is None or not self.video_annotation_context_matches:
+            return None
+        return timeline
+
+    def updateVideoAnnotationDataContext(self):
+        """Bind an annotation project only to its matching imported DAS source."""
+
+        data_group, timeline = self._videoDataContext()
+        if data_group is None or timeline is None:
+            self.video_annotation_context_matches = False
+            self._updateVideoControlEnabledState()
+            return False
+        matches = self.video_annotation_project.set_das_context(data_group, timeline)
+        self.video_annotation_context_matches = bool(matches)
+        if matches:
+            self.video_annotation_project.reproject_video_annotations(timeline)
+        self._updateVideoControlEnabledState()
+        return matches
+
+    def _updateVideoControlEnabledState(self):
+        """Keep media controls usable while withholding data-dependent marking."""
+
+        has_video = bool(self.video_annotation_project.video_path)
+        has_timeline = self._annotationTimeline() is not None
+        has_sync = has_video and self.video_annotation_project.sync.video_start_time is not None
+        can_mark = has_timeline and has_sync
+        for widget in (
+                self.video_camera_channel_spin_box,
+                self.video_camera_channel_apply_button,
+                self.video_camera_visible_checkbox,
+                self.video_annotations_visible_checkbox,
+                self.video_follow_checkbox,
+        ):
+            widget.setEnabled(has_timeline)
+        for widget in (
+                self.annotation_point_button,
+                self.annotation_interval_start_button,
+                self.annotation_update_button,
+        ):
+            widget.setEnabled(can_mark)
+        self.annotation_interval_finish_button.setEnabled(
+            can_mark and self.video_annotation_interval_start_ms is not None
+        )
+        self.annotation_export_button.setEnabled(bool(self.video_annotation_project.annotations))
+        self.annotation_save_button.setEnabled(True)
+        self.annotation_delete_button.setEnabled(self.video_annotation_selected_id is not None)
+        self.annotation_undo_button.setEnabled(bool(self.video_annotation_project.annotations))
+        if not has_timeline:
+            self.video_sync_summary_label.setText('对时：请先导入与视频对应的 DAS 数据')
+        elif not self.video_annotation_context_matches:
+            self.video_sync_summary_label.setText('对时：当前标注工程不属于这组 DAS 文件，已停止显示标签')
+        elif not has_video:
+            self.video_sync_summary_label.setText('对时：请选择摄像头视频')
+        elif not has_sync:
+            self.video_sync_summary_label.setText('对时：请设置视频开始时间')
+
+    def _markVideoAnnotationDirty(self):
+        self.video_annotation_dirty = True
+        self._updateVideoProjectLabel()
+
+    def _updateVideoProjectLabel(self):
+        project_path = self.video_annotation_project.project_path
+        if project_path:
+            state = '有未保存修改' if self.video_annotation_dirty else '已保存'
+            self.annotation_project_label.setText(f'{state}：{project_path}')
+            self.annotation_project_label.setToolTip(project_path)
+        else:
+            self.annotation_project_label.setText('未保存：标签仅在本次会话保留')
+            self.annotation_project_label.setToolTip('请使用“保存”创建独立标注工程文件')
+
+    def _syncVideoProjectWidgets(self):
+        """Reflect model state in controls without accidentally applying edits."""
+
+        project = self.video_annotation_project
+        self.video_camera_channel_spin_box.blockSignals(True)
+        self.video_camera_visible_checkbox.blockSignals(True)
+        self.video_start_time_edit.blockSignals(True)
+        self.video_sync_offset_spin_box.blockSignals(True)
+        self.video_sync_rate_spin_box.blockSignals(True)
+        try:
+            self.video_camera_channel_spin_box.setValue(max(1, project.camera_channel))
+            self.video_camera_visible_checkbox.setChecked(project.camera_visible)
+            if project.sync.video_start_time is not None:
+                self.video_start_time_edit.setDateTime(QDateTime(project.sync.video_start_time))
+            self.video_sync_offset_spin_box.setValue(project.sync.manual_offset_seconds)
+            self.video_sync_rate_spin_box.setValue(project.sync.rate)
+        finally:
+            self.video_camera_channel_spin_box.blockSignals(False)
+            self.video_camera_visible_checkbox.blockSignals(False)
+            self.video_start_time_edit.blockSignals(False)
+            self.video_sync_offset_spin_box.blockSignals(False)
+            self.video_sync_rate_spin_box.blockSignals(False)
+        self._updateVideoProjectLabel()
+        self._updateVideoControlEnabledState()
+
+    def chooseVideoComparisonFile(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            '选择摄像头视频',
+            '',
+            '视频文件 (*.mp4 *.mov *.avi *.mkv *.mpeg *.mpg *.m4v);;所有文件 (*.*)',
+        )
+        if path:
+            self.loadVideoComparisonFile(path)
+
+    def loadVideoComparisonFile(self, path: str, update_project: bool = True):
+        """Set media without copying, converting, or altering the source video."""
+
+        path = str(path)
+        if update_project:
+            parsed_start = parse_video_start_time(path)
+            self.video_annotation_project.set_video(path, parsed_start)
+            self._markVideoAnnotationDirty()
+            if parsed_start is None:
+                self.video_sync_hint_label.setText(
+                    '未能从文件名识别开始时间，请在此手工填写后点击“应用对时”。'
+                )
+            else:
+                self.video_sync_hint_label.setText(
+                    '已从文件名识别视频开始时间；仍可用偏移和倍率手工校正。'
+                )
+        self.video_source_label.setText(path)
+        self.video_source_label.setToolTip(path)
+        self._syncVideoProjectWidgets()
+        if self.video_player is None:
+            self.video_sync_summary_label.setText('当前 PyQt 安装没有可用的视频画面组件。')
+            return
+        self.video_player.stop()
+        self.video_player.setMedia(QtMultimedia.QMediaContent(QUrl.fromLocalFile(path)))
+        self.video_position_slider.setRange(0, 0)
+        self.video_time_label.setText('--:--:--.--- / --:--:--.---')
+        self._updateVideoPlayhead(0, force=True)
+        self.plotVideoComparisonImage()
+
+    def toggleVideoPlayback(self):
+        if self.video_player is None or not self.video_annotation_project.video_path:
+            return
+        if self.video_player.state() == QtMultimedia.QMediaPlayer.PlayingState:
+            self.video_player.pause()
+        else:
+            self.video_player.play()
+
+    def seekVideoByMilliseconds(self, delta: int):
+        if self.video_player is None:
+            return
+        maximum = max(0, self.video_player.duration())
+        target = min(max(0, self.video_player.position() + int(delta)), maximum)
+        self.video_player.setPosition(target)
+        self._updateVideoPlayhead(target, force=True)
+
+    def setVideoPlaybackRate(self, _index: int):
+        if self.video_player is not None:
+            self.video_player.setPlaybackRate(float(self.video_speed_combo.currentData() or 1.0))
+
+    def _videoSliderPressed(self):
+        self._video_slider_dragging = True
+
+    def _videoSliderMoved(self, value: int):
+        self.video_time_label.setText(
+            f'{format_video_position(value)} / {format_video_position(self.video_position_slider.maximum())}'
+        )
+        self._updateVideoPlayhead(value, force=True)
+
+    def _videoSliderReleased(self):
+        self._video_slider_dragging = False
+        if self.video_player is not None:
+            self.video_player.setPosition(self.video_position_slider.value())
+        self._updateVideoPlayhead(self.video_position_slider.value(), force=True)
+
+    def _videoDurationChanged(self, duration: int):
+        self.video_position_slider.setRange(0, max(0, int(duration)))
+        self.video_time_label.setText(
+            f'{format_video_position(self.video_player.position() if self.video_player else 0)} / '
+            f'{format_video_position(duration)}'
+        )
+
+    def _videoStateChanged(self, state):
+        self.video_play_button.setText(
+            '暂停' if state == QtMultimedia.QMediaPlayer.PlayingState else '播放'
+        )
+
+    def _videoMediaStatusChanged(self, status):
+        if status == QtMultimedia.QMediaPlayer.LoadedMedia:
+            self.video_sync_summary_label.setText('视频已载入；当前时间会同步到下方 DAS 竖线。')
+        elif status == QtMultimedia.QMediaPlayer.InvalidMedia:
+            self.video_sync_summary_label.setText('视频格式或编码无法由当前 Windows 媒体后端播放。')
+
+    def _videoPlayerError(self, *_args):
+        if self.video_player is not None:
+            details = self.video_player.errorString().strip()
+            if details:
+                self.video_sync_summary_label.setText(f'视频播放失败：{details}')
+
+    def _videoPositionChanged(self, position: int):
+        if not self._video_slider_dragging:
+            self.video_position_slider.setValue(max(0, int(position)))
+        self.video_time_label.setText(
+            f'{format_video_position(position)} / {format_video_position(self.video_position_slider.maximum())}'
+        )
+        self._updateVideoPlayhead(position)
+
+    def _updateVideoPlayhead(self, position_ms: int, force: bool = False):
+        """Move the synchronized cursor only; never redraw the data image per frame."""
+
+        if not force and int(position_ms) - self._last_video_playhead_update_ms < 50:
+            return
+        self._last_video_playhead_update_ms = int(position_ms)
+        timeline = self._annotationTimeline()
+        if timeline is None:
+            self.video_current_das_label.setText('DAS：等待数据')
+            return
+        sample = self.video_annotation_project.sync.sample_for_video_position(position_ms, timeline)
+        if sample is None:
+            self.video_current_das_label.setText('DAS：未设置视频开始时间')
+            return
+        sampling_rate = float(timeline.sampling_rate)
+        seconds = sample / sampling_rate
+        wall_time = timeline.absolute_time_for_sample(sample)
+        self.video_current_das_label.setText(
+            f'DAS {format_wall_time(wall_time)}  |  样点 {sample}'
+        )
+        if self.video_playhead_line is not None:
+            self.video_playhead_line.setPos(seconds)
+        if self.video_follow_checkbox.isChecked() and self.video_das_plot_widget is not None:
+            view_box = self.video_das_plot_widget.getViewBox()
+            left, right = view_box.viewRange()[0]
+            width = max(right - left, 1 / sampling_rate)
+            if seconds < left + width * 0.15 or seconds > right - width * 0.15:
+                maximum = timeline.total_samples / sampling_rate
+                target_left = min(max(seconds - width * 0.5, 0.0), max(0.0, maximum - width))
+                view_box.setXRange(target_left, min(maximum, target_left + width), padding=0)
+
+    def _videoDasClicked(self, event):
+        """Seek, or use Ctrl+Shift to anchor the current video frame to DAS."""
+
+        if event.button() != Qt.LeftButton or not (event.modifiers() & Qt.ControlModifier):
+            return
+        timeline = self._annotationTimeline()
+        if timeline is None:
+            return
+        view_box = self.video_das_plot_widget.getViewBox()
+        point = view_box.mapSceneToView(event.scenePos())
+        sample = min(
+            max(int(round(point.x() * timeline.sampling_rate)), 0),
+            timeline.total_samples,
+        )
+        if event.modifiers() & Qt.ShiftModifier:
+            self._alignCurrentVideoToDasSample(sample)
+            return
+        position = self.video_annotation_project.sync.video_position_for_sample(sample, timeline)
+        if position is None:
+            return
+        if self.video_player is not None:
+            self.video_player.pause()
+            self.video_player.setPosition(position)
+        self._updateVideoPlayhead(position, force=True)
+
+    def _alignCurrentVideoToDasSample(self, sample: int):
+        """Make the paused/current video position correspond to one DAS sample."""
+
+        timeline = self._annotationTimeline()
+        sync = self.video_annotation_project.sync
+        if timeline is None or sync.video_start_time is None:
+            printError('请先选择视频并设置视频开始时间，再建立手工对时锚点')
+            return
+        if self.video_player is not None:
+            self.video_player.pause()
+        position_ms = self._currentVideoPosition()
+        target_time = timeline.absolute_time_for_sample(sample)
+        offset = (
+            (target_time - sync.video_start_time).total_seconds()
+            - position_ms / 1000.0 * sync.rate
+        )
+        sync.update(sync.video_start_time, offset, sync.rate)
+        moved = self.video_annotation_project.reproject_video_annotations(timeline)
+        self._markVideoAnnotationDirty()
+        self._syncVideoProjectWidgets()
+        self.refreshVideoAnnotationTable(select_identifier=self.video_annotation_selected_id)
+        self.plotVideoComparisonImage()
+        self._updateVideoPlayhead(position_ms, force=True)
+        self.video_sync_summary_label.setText(
+            f'已建立手工对时锚点：视频 {format_video_position(position_ms)} '
+            f'→ DAS {format_wall_time(target_time)}；重新定位 {moved} 条标签。'
+        )
+
+    def applyVideoCameraChannel(self):
+        if self._annotationTimeline() is None:
+            return
+        channel_from, channel_to = self._videoChannelBounds()
+        self.video_annotation_project.camera_channel = min(
+            max(channel_from, int(self.video_camera_channel_spin_box.value())), channel_to
+        )
+        self._markVideoAnnotationDirty()
+        self.plotVideoComparisonImage()
+
+    def _videoCameraLineMoved(self, line):
+        if self.video_das_plot_widget is None or self._annotationTimeline() is None:
+            return
+        local_channel = float(line.value())
+        channel_from, channel_to = self._videoChannelBounds()
+        global_channel = min(
+            max(channel_from, int(round(local_channel - 0.5 + channel_from))),
+            channel_to,
+        )
+        self.video_annotation_project.camera_channel = global_channel
+        self.video_camera_channel_spin_box.blockSignals(True)
+        try:
+            self.video_camera_channel_spin_box.setValue(global_channel)
+        finally:
+            self.video_camera_channel_spin_box.blockSignals(False)
+        self._markVideoAnnotationDirty()
+        self.plotVideoComparisonImage()
+
+    def setVideoCameraVisible(self, visible: bool):
+        self.video_annotation_project.camera_visible = bool(visible)
+        self._markVideoAnnotationDirty()
+        self.plotVideoComparisonImage()
+
+    def setVideoAnnotationsVisible(self, _visible: bool):
+        self.plotVideoComparisonImage()
+
+    def applyVideoSync(self):
+        """Apply an explicit time adjustment and reproject video-origin labels."""
+
+        if not self.video_annotation_project.video_path:
+            printError('请先选择摄像头视频')
+            return
+        start_time = self.video_start_time_edit.dateTime().toPyDateTime()
+        try:
+            changed = self.video_annotation_project.sync.update(
+                start_time,
+                self.video_sync_offset_spin_box.value(),
+                self.video_sync_rate_spin_box.value(),
+            )
+        except ValueError as error:
+            printError(str(error))
+            return
+        timeline = self._annotationTimeline()
+        moved = self.video_annotation_project.reproject_video_annotations(timeline) if timeline else 0
+        if changed or moved:
+            self._markVideoAnnotationDirty()
+        self.refreshVideoAnnotationTable(select_identifier=self.video_annotation_selected_id)
+        self.plotVideoComparisonImage()
+        self._updateVideoPlayhead(
+            self.video_player.position() if self.video_player is not None else self.video_position_slider.value(),
+            force=True,
+        )
+        self.video_sync_summary_label.setText(
+            f'对时已应用：版本 {self.video_annotation_project.sync.revision}，'
+            f'重新定位 {moved} 条视频标注。'
+        )
+
+    def newVideoAnnotationProject(self):
+        if self.video_annotation_dirty and self.video_annotation_project.annotations:
+            reply = QMessageBox.question(
+                self,
+                '新建标注工程',
+                '当前标注尚未保存，仍要新建并清空本次会话标签吗？',
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if reply != QMessageBox.Yes:
+                return
+        self.video_annotation_project = AnnotationProject()
+        self.video_annotation_context_matches = self.data_timeline is not None
+        self.video_annotation_selected_id = None
+        self.video_annotation_interval_start_ms = None
+        self.video_annotation_dirty = False
+        self._video_trajectory_candidates = {}
+        if self.video_player is not None:
+            self.video_player.stop()
+            self.video_player.setMedia(QtMultimedia.QMediaContent())
+        self.video_source_label.setText('未载入摄像头视频')
+        self.video_position_slider.setRange(0, 0)
+        self.video_time_label.setText('--:--:--.--- / --:--:--.---')
+        if self.data_group is not None and self.data_timeline is not None:
+            self.updateVideoAnnotationDataContext()
+        self._syncVideoProjectWidgets()
+        self.refreshVideoAnnotationTable()
+        self.plotVideoComparisonImage()
+
+    def openVideoAnnotationProject(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            '打开标注工程',
+            '',
+            'DAS 视频标注工程 (*.dasannotations.json *.json);;所有文件 (*.*)',
+        )
+        if not path:
+            return
+        try:
+            project = AnnotationProject.load(path)
+        except ValueError as error:
+            QMessageBox.warning(self, '打开标注工程失败', str(error))
+            return
+        self.video_annotation_project = project
+        self.video_annotation_dirty = False
+        self.video_annotation_selected_id = None
+        self.video_annotation_interval_start_ms = None
+        matches = self.updateVideoAnnotationDataContext() if self.data_timeline is not None else False
+        self._syncVideoProjectWidgets()
+        self.refreshVideoAnnotationTable()
+        if project.video_path:
+            self.loadVideoComparisonFile(project.video_path, update_project=False)
+        else:
+            self.plotVideoComparisonImage()
+        if not matches and project.annotations:
+            QMessageBox.warning(
+                self,
+                'DAS 数据不匹配',
+                '该标注工程绑定的 DAS 文件、采样率或采样数与当前导入数据不一致；'
+                '为避免错位，标签暂不显示，也不能新增标注。',
+            )
+
+    def saveVideoAnnotationProject(self):
+        path = self.video_annotation_project.project_path
+        if not path:
+            default_name = 'video_annotations.dasannotations.json'
+            if self.video_annotation_project.video_path:
+                stem = os.path.splitext(os.path.basename(self.video_annotation_project.video_path))[0]
+                default_name = f'{stem}.dasannotations.json'
+            path, _ = QFileDialog.getSaveFileName(
+                self,
+                '保存标注工程',
+                default_name,
+                'DAS 视频标注工程 (*.dasannotations.json);;JSON 文件 (*.json)',
+            )
+        if not path:
+            return
+        try:
+            self.video_annotation_project.save(path)
+        except (OSError, ValueError) as error:
+            QMessageBox.warning(self, '保存标注工程失败', str(error))
+            return
+        self.video_annotation_dirty = False
+        self._updateVideoProjectLabel()
+        self.statusBar().showMessage(f'标注工程已保存：{path}', 6000)
+
+    def exportVideoAnnotationsCsv(self):
+        if not self.video_annotation_project.annotations:
+            printError('当前没有可导出的标注')
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            '导出标注 CSV',
+            'video_annotations.csv',
+            'CSV 文件 (*.csv)',
+        )
+        if not path:
+            return
+        try:
+            self.video_annotation_project.export_csv(path, self._annotationTimeline())
+        except OSError as error:
+            QMessageBox.warning(self, '导出 CSV 失败', str(error))
+            return
+        self.statusBar().showMessage(f'已导出 {len(self.video_annotation_project.annotations)} 条标注：{path}', 6000)
+
+    def refreshVideoAnnotationTable(self, select_identifier=None):
+        timeline = self._annotationTimeline()
+        selected = self.video_annotation_selected_id if select_identifier is None else select_identifier
+        self.annotation_table.blockSignals(True)
+        try:
+            annotations = self.video_annotation_project.annotations
+            self.annotation_table.setRowCount(len(annotations))
+            target_row = -1
+            for row, annotation in enumerate(annotations):
+                visible = QTableWidgetItem()
+                visible.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable | Qt.ItemIsUserCheckable)
+                visible.setCheckState(Qt.Checked if annotation.visible else Qt.Unchecked)
+                visible.setData(Qt.UserRole, annotation.identifier)
+                self.annotation_table.setItem(row, 0, visible)
+                identifier = QTableWidgetItem(str(annotation.identifier))
+                identifier.setData(Qt.UserRole, annotation.identifier)
+                self.annotation_table.setItem(row, 1, identifier)
+                self.annotation_table.setItem(row, 2, QTableWidgetItem(annotation.kind))
+                self.annotation_table.setItem(row, 3, QTableWidgetItem(
+                    format_video_position(annotation.start_video_ms)
+                    + (f' – {format_video_position(annotation.end_video_ms)}' if annotation.is_interval else '')
+                ))
+                das_text = ''
+                if timeline is not None:
+                    das_text = format_wall_time(timeline.absolute_time_for_sample(annotation.start_sample))
+                self.annotation_table.setItem(row, 4, QTableWidgetItem(das_text))
+                trajectory_text = ''
+                if annotation.trajectory_identifier is not None:
+                    trajectory_text = f'#{annotation.trajectory_identifier}'
+                    if annotation.time_residual_ms is not None:
+                        trajectory_text += f'  {annotation.time_residual_ms:+.0f} ms'
+                self.annotation_table.setItem(row, 5, QTableWidgetItem(trajectory_text))
+                conclusion = QTableWidgetItem(annotation.outcome)
+                conclusion.setToolTip(annotation.note or '无备注')
+                self.annotation_table.setItem(row, 6, conclusion)
+                if annotation.identifier == selected:
+                    target_row = row
+            if target_row >= 0:
+                self.annotation_table.selectRow(target_row)
+        finally:
+            self.annotation_table.blockSignals(False)
+        self._updateVideoControlEnabledState()
+
+    def _videoAnnotationTableItemChanged(self, item):
+        if item.column() != 0:
+            return
+        identifier_item = self.annotation_table.item(item.row(), 1)
+        if identifier_item is None:
+            return
+        annotation = self.video_annotation_project.annotation_by_identifier(
+            identifier_item.data(Qt.UserRole)
+        )
+        if annotation is None:
+            return
+        annotation.visible = item.checkState() == Qt.Checked
+        self._markVideoAnnotationDirty()
+        self.plotVideoComparisonImage()
+
+    def _videoAnnotationTableSelectionChanged(self):
+        rows = self.annotation_table.selectionModel().selectedRows()
+        if not rows:
+            self.video_annotation_selected_id = None
+            self._updateVideoControlEnabledState()
+            return
+        identifier_item = self.annotation_table.item(rows[0].row(), 1)
+        if identifier_item is None:
+            return
+        identifier = identifier_item.data(Qt.UserRole)
+        annotation = self.video_annotation_project.annotation_by_identifier(identifier)
+        if annotation is None:
+            return
+        self.video_annotation_selected_id = annotation.identifier
+        self.annotation_kind_combo.setCurrentText(annotation.kind)
+        self.annotation_outcome_combo.setCurrentText(annotation.outcome)
+        self.annotation_note_edit.setText(annotation.note)
+        self._refreshAnnotationTrajectoryChoices(annotation)
+        if self.video_player is not None:
+            self.video_player.pause()
+            self.video_player.setPosition(annotation.start_video_ms)
+        else:
+            self.video_position_slider.setValue(annotation.start_video_ms)
+        self._updateVideoPlayhead(annotation.start_video_ms, force=True)
+        self._updateVideoControlEnabledState()
+
+    def _refreshAnnotationTrajectoryChoices(self, annotation):
+        self.annotation_trajectory_combo.blockSignals(True)
+        try:
+            self.annotation_trajectory_combo.clear()
+            self.annotation_trajectory_combo.addItem('不关联轨迹', None)
+            self._video_trajectory_candidates = {}
+            timeline = self._annotationTimeline()
+            if timeline is not None:
+                candidates = trajectory_candidates(
+                    self.vehicle_trajectories,
+                    annotation.camera_channel,
+                    annotation.start_sample / timeline.sampling_rate,
+                    self.annotation_trajectory_tolerance_spin_box.value(),
+                )
+                for candidate in candidates:
+                    self._video_trajectory_candidates[candidate.identifier] = candidate
+                    self.annotation_trajectory_combo.addItem(
+                        f'轨迹 #{candidate.identifier} · Δ {candidate.residual_ms:+.1f} ms',
+                        candidate.identifier,
+                    )
+            if annotation.trajectory_identifier is not None:
+                index = self.annotation_trajectory_combo.findData(annotation.trajectory_identifier)
+                if index < 0:
+                    self.annotation_trajectory_combo.addItem(
+                        f'轨迹 #{annotation.trajectory_identifier}（已关联，当前不在候选窗）',
+                        annotation.trajectory_identifier,
+                    )
+                    index = self.annotation_trajectory_combo.count() - 1
+                self.annotation_trajectory_combo.setCurrentIndex(index)
+            else:
+                self.annotation_trajectory_combo.setCurrentIndex(0)
+        finally:
+            self.annotation_trajectory_combo.blockSignals(False)
+
+    def _currentVideoPosition(self):
+        return self.video_player.position() if self.video_player is not None else self.video_position_slider.value()
+
+    def _addVideoAnnotation(self, start_ms: int, end_ms=None):
+        timeline = self._annotationTimeline()
+        if timeline is None:
+            printError('请先导入与标注工程匹配的 DAS 数据')
+            return None
+        try:
+            annotation = self.video_annotation_project.add_video_annotation(
+                timeline,
+                self.annotation_kind_combo.currentText(),
+                self.annotation_outcome_combo.currentText(),
+                start_ms,
+                self.video_annotation_project.camera_channel,
+                end_video_ms=end_ms,
+                note=self.annotation_note_edit.text(),
+            )
+        except ValueError as error:
+            printError(str(error))
+            return None
+        self.video_annotation_selected_id = annotation.identifier
+        self._markVideoAnnotationDirty()
+        self.refreshVideoAnnotationTable(select_identifier=annotation.identifier)
+        self._refreshAnnotationTrajectoryChoices(annotation)
+        self.plotVideoComparisonImage()
+        self.statusBar().showMessage(
+            f'已添加标注 #{annotation.identifier}：{annotation.kind}。可在左侧关联候选轨迹。',
+            6000,
+        )
+        return annotation
+
+    def addVideoPointAnnotation(self):
+        self._addVideoAnnotation(self._currentVideoPosition())
+
+    def beginVideoIntervalAnnotation(self):
+        if self._annotationTimeline() is None:
+            printError('请先完成视频与 DAS 的对时')
+            return
+        self.video_annotation_interval_start_ms = self._currentVideoPosition()
+        self.annotation_interval_label.setText(
+            f'区间起点：{format_video_position(self.video_annotation_interval_start_ms)}'
+        )
+        self._updateVideoControlEnabledState()
+
+    def finishVideoIntervalAnnotation(self):
+        if self.video_annotation_interval_start_ms is None:
+            return
+        start = self.video_annotation_interval_start_ms
+        end = self._currentVideoPosition()
+        annotation = self._addVideoAnnotation(start, end)
+        if annotation is not None:
+            self.video_annotation_interval_start_ms = None
+            self.annotation_interval_label.setText('未开始区间标注')
+            self._updateVideoControlEnabledState()
+
+    def updateSelectedVideoAnnotation(self):
+        annotation = self.video_annotation_project.annotation_by_identifier(self.video_annotation_selected_id)
+        if annotation is None:
+            printError('请先在标注列表中选择一条记录')
+            return
+        annotation.kind = self.annotation_kind_combo.currentText().strip() or annotation.kind
+        annotation.outcome = self.annotation_outcome_combo.currentText().strip() or annotation.outcome
+        annotation.note = self.annotation_note_edit.text().strip()
+        selected_trajectory = self.annotation_trajectory_combo.currentData()
+        try:
+            selected_trajectory = int(selected_trajectory) if selected_trajectory is not None else None
+        except (TypeError, ValueError):
+            selected_trajectory = None
+        annotation.trajectory_identifier = selected_trajectory
+        annotation.time_residual_ms = None
+        if selected_trajectory is not None:
+            trajectory = next(
+                (item for item in self.vehicle_trajectories if item.identifier == selected_trajectory),
+                None,
+            )
+            crossing = trajectory_crossing_time(trajectory, annotation.camera_channel) if trajectory else None
+            if crossing is not None:
+                timeline = self._annotationTimeline()
+                sampling_rate = timeline.sampling_rate if timeline is not None else self.sampling_rate
+                annotation.time_residual_ms = (
+                    crossing - annotation.start_sample / sampling_rate
+                ) * 1000.0
+        self._markVideoAnnotationDirty()
+        self.refreshVideoAnnotationTable(select_identifier=annotation.identifier)
+        self.plotVideoComparisonImage()
+
+    def deleteSelectedVideoAnnotation(self):
+        if self.video_annotation_selected_id is None:
+            return
+        removed = self.video_annotation_project.delete_annotation(self.video_annotation_selected_id)
+        if removed is None:
+            return
+        self.video_annotation_selected_id = None
+        self._markVideoAnnotationDirty()
+        self.refreshVideoAnnotationTable()
+        self.plotVideoComparisonImage()
+        self.statusBar().showMessage(f'已删除标注 #{removed.identifier}。', 5000)
+
+    def undoLastVideoAnnotation(self):
+        if not self.video_annotation_project.annotations:
+            return
+        removed = self.video_annotation_project.annotations.pop()
+        self.video_annotation_selected_id = None
+        self._markVideoAnnotationDirty()
+        self.refreshVideoAnnotationTable()
+        self.plotVideoComparisonImage()
+        self.statusBar().showMessage(f'已撤销最后一条标注 #{removed.identifier}。', 5000)
+
     def initLocalParams(self):
         """
         初始化局部参数，即适用于单个文件，重新选择文件后更新
@@ -996,6 +2048,36 @@ class MainWindow(QMainWindow):
 
         # 判断返回值，如果点击的是Yes按钮，我们就关闭组件和应用，否则就忽略关闭事件
         event.accept() if reply == QMessageBox.Yes else event.ignore()
+
+    def keyPressEvent(self, event):
+        """Expose visible video-label shortcuts without hijacking text editors."""
+
+        focus = QApplication.focusWidget()
+        if focus is not None and any(
+                focus.inherits(name)
+                for name in ('QLineEdit', 'QAbstractSpinBox', 'QComboBox', 'QTableWidget')
+        ):
+            super().keyPressEvent(event)
+            return
+        if hasattr(self, 'tab_widget') and self.tab_widget.currentWidget() is self.video_compare_container:
+            key = event.key()
+            if key == Qt.Key_Space:
+                self.toggleVideoPlayback()
+                event.accept()
+                return
+            if key == Qt.Key_T:
+                self.addVideoPointAnnotation()
+                event.accept()
+                return
+            if key == Qt.Key_I:
+                self.beginVideoIntervalAnnotation()
+                event.accept()
+                return
+            if key == Qt.Key_O:
+                self.finishVideoIntervalAnnotation()
+                event.accept()
+                return
+        super().keyPressEvent(event)
 
     def removeTab(self, index: int):
         """
@@ -1585,12 +2667,13 @@ class MainWindow(QMainWindow):
         view_box.setLimits(xMin=start_time, xMax=start_time + duration, yMin=0, yMax=channel_count)
         view_box.setRange(xRange=(start_time, start_time + duration), yRange=(0, channel_count), padding=0)
 
-    def drawVehicleTrajectories(self):
-        """Draw stored vehicle paths in the current image's local coordinates."""
+    def drawVehicleTrajectories(self, plot_widget=None):
+        """Draw stored vehicle paths in an image plot's local coordinates."""
         if self._hide_vehicle_trajectories or not self.vehicle_trajectories:
             return
         if not hasattr(self, 'sampling_times_from_num') or not hasattr(self, 'channel_from_num'):
             return
+        plot_widget = plot_widget or self.plot_gray_scale_widget
 
         start_time = (self.sampling_times_from_num - 1) / self.sampling_rate
         end_time = self.sampling_times_to_num / self.sampling_rate
@@ -1613,7 +2696,7 @@ class MainWindow(QMainWindow):
                 continue
             color = colors[(int(trajectory.identifier) - 1) % len(colors)]
             local_channels = channels[visible] - channel_from + 0.5
-            self.plot_gray_scale_widget.plot(
+            plot_widget.plot(
                 times[visible],
                 local_channels,
                 pen=pg.mkPen(color=color, width=2),
@@ -1621,7 +2704,213 @@ class MainWindow(QMainWindow):
             )
             label = pg.TextItem(str(trajectory.identifier), color=color, anchor=(0, 1))
             label.setPos(float(times[visible][0]), float(local_channels[0]))
-            self.plot_gray_scale_widget.addItem(label)
+            plot_widget.addItem(label)
+
+    def plotVideoComparisonImage(self):
+        """Draw the current DAS view below video without tying it to playback ticks."""
+
+        if not hasattr(self, 'video_das_plot_widget'):
+            return
+        plot_widget = self.video_das_plot_widget
+        plot_widget.clear()
+        self._video_annotation_items = []
+        self.video_playhead_line = None
+        self.video_camera_line = None
+        data_group, timeline = self._videoDataContext()
+        display_data = self._videoDisplayData()
+        sequence_active = self.video_sequence_display_data is not None
+        plot_widget.setTimeOrigin(timeline.start_time if timeline is not None else None)
+        plot_widget.setTitle('')
+        if display_data is None or timeline is None or data_group is None:
+            self.video_current_das_label.setText('DAS：请先导入数据')
+            self.video_sequence_status_label.setText('连续 DAS：未加载')
+            return
+
+        channel_from, channel_to = self._videoChannelBounds()
+        channel_count = channel_to - channel_from + 1
+        if not sequence_active:
+            count = len(data_group.segments)
+            self.video_sequence_status_label.setText(f'连续 DAS：普通加载 {count} 文件')
+            self.video_sequence_status_label.setToolTip(
+                '当前视频使用普通全分辨率导入数据；选择一个起始文件并开启“视频连续”可读取后续文件。'
+            )
+
+        self.video_camera_channel_spin_box.blockSignals(True)
+        try:
+            self.video_camera_channel_spin_box.setRange(channel_from, channel_to)
+            self.video_camera_channel_spin_box.setValue(
+                min(max(channel_from, self.video_annotation_project.camera_channel), channel_to)
+            )
+        finally:
+            self.video_camera_channel_spin_box.blockSignals(False)
+
+        item = pg.ImageItem()
+        if sequence_active:
+            duration = timeline.total_samples / timeline.sampling_rate
+            item.setImage(display_data.T, autoLevels=True)
+            item.setRect(QRectF(0.0, 0.0, duration, channel_count))
+            plot_widget.addItem(item)
+            view_box = plot_widget.getViewBox()
+            view_box.setLimits(xMin=0.0, xMax=duration, yMin=0.0, yMax=channel_count)
+            current_sample = self.video_annotation_project.sync.sample_for_video_position(
+                self._currentVideoPosition(), timeline
+            )
+            current_seconds = (current_sample or 0) / timeline.sampling_rate
+            initial_width = min(duration, 120.0)
+            initial_left = min(
+                max(current_seconds - initial_width * 0.15, 0.0),
+                max(0.0, duration - initial_width),
+            )
+            view_box.setRange(
+                xRange=(initial_left, initial_left + initial_width),
+                yRange=(0.0, channel_count),
+                padding=0,
+            )
+        else:
+            self.addDataImageItem(
+                plot_widget,
+                item,
+                display_data,
+                use_image_controls=False,
+                show_color_bar=False,
+            )
+            self.drawFileBoundaries(plot_widget, 0, channel_count)
+            self.drawVehicleTrajectories(plot_widget)
+            self.drawEventRange(plot_widget)
+        if self.video_annotation_context_matches:
+            self._drawVideoCameraLine()
+            self._drawVideoAnnotations()
+        self._drawVideoPlayhead()
+        self._updateVideoPlayhead(self._currentVideoPosition(), force=True)
+
+    def _drawVideoCameraLine(self):
+        if not self.video_annotation_project.camera_visible:
+            return
+        channel = self.video_annotation_project.camera_channel
+        channel_from, channel_to = self._videoChannelBounds()
+        if not (channel_from <= channel <= channel_to):
+            return
+        local_channel = channel - channel_from + 0.5
+        line = pg.InfiniteLine(
+            pos=local_channel,
+            angle=0,
+            movable=True,
+            bounds=(0, channel_to - channel_from + 1),
+            pen=pg.mkPen('#2563eb', width=3),
+            hoverPen=pg.mkPen('#1d4ed8', width=5),
+        )
+        line.setZValue(28)
+        line.setToolTip('拖动此线可修正摄像头对应的全局 DAS 通道；不会修改 DAS 数据。')
+        pg.InfLineLabel(
+            line,
+            text=f'{self.video_annotation_project.camera_name} · 通道 {channel}',
+            position=0.97,
+            color='#1d4ed8',
+            fill=pg.mkBrush(255, 255, 255, 215),
+            movable=True,
+        )
+        line.sigPositionChangeFinished.connect(lambda item=line: self._videoCameraLineMoved(item))
+        self.video_das_plot_widget.addItem(line)
+        self.video_camera_line = line
+        self._video_annotation_items.append(line)
+
+    def _drawVideoAnnotations(self):
+        if not self.video_annotations_visible_checkbox.isChecked():
+            return
+        timeline = self._annotationTimeline()
+        if timeline is None:
+            return
+        sampling_rate = float(timeline.sampling_rate)
+        duration = timeline.total_samples / sampling_rate
+        channel_from, channel_to = self._videoChannelBounds()
+        palette = {
+            '确认匹配': ('#13734a', (230, 247, 239, 76), 't'),
+            'DAS未检测到': ('#b42318', (254, 243, 242, 76), 'x'),
+            '疑似误检': ('#b42318', (254, 243, 242, 76), 'x'),
+            '不确定': ('#9a5b00', (255, 243, 214, 76), 'o'),
+        }
+        for index, annotation in enumerate(self.video_annotation_project.annotations):
+            if not annotation.visible:
+                continue
+            color, brush_color, symbol = palette.get(
+                annotation.outcome,
+                ('#2563eb', (234, 241, 255, 72), 'o'),
+            )
+            start_seconds = annotation.start_sample / sampling_rate
+            selected = annotation.identifier == self.video_annotation_selected_id
+            width = 4 if selected else 2
+            label_text = f'#{annotation.identifier} {annotation.kind}'
+            if annotation.is_interval:
+                end_seconds = annotation.end_sample / sampling_rate
+                region = pg.LinearRegionItem(
+                    values=(start_seconds, end_seconds),
+                    orientation=pg.LinearRegionItem.Vertical,
+                    movable=False,
+                    brush=pg.mkBrush(*brush_color),
+                    hoverBrush=pg.mkBrush(*brush_color),
+                    bounds=(0.0, duration),
+                )
+                region.setZValue(34)
+                for line in region.lines:
+                    line.setPen(pg.mkPen(color, width=width))
+                pg.InfLineLabel(
+                    region.lines[0],
+                    text=label_text,
+                    position=0.12 + (index % 5) * 0.13,
+                    color=color,
+                    fill=pg.mkBrush(255, 255, 255, 215),
+                    movable=False,
+                )
+                self.video_das_plot_widget.addItem(region)
+                self._video_annotation_items.append(region)
+            else:
+                line = pg.InfiniteLine(
+                    pos=start_seconds,
+                    angle=90,
+                    movable=False,
+                    pen=pg.mkPen(color, width=width),
+                    hoverPen=pg.mkPen(color, width=width + 1),
+                )
+                line.setZValue(34)
+                line.setToolTip(
+                    f'标注 #{annotation.identifier}：{annotation.kind}；'
+                    f'{format_video_position(annotation.start_video_ms)}'
+                )
+                pg.InfLineLabel(
+                    line,
+                    text=label_text,
+                    position=0.12 + (index % 5) * 0.13,
+                    color=color,
+                    fill=pg.mkBrush(255, 255, 255, 215),
+                    movable=False,
+                )
+                self.video_das_plot_widget.addItem(line)
+                self._video_annotation_items.append(line)
+            if channel_from <= annotation.camera_channel <= channel_to:
+                marker = pg.ScatterPlotItem(
+                    [start_seconds],
+                    [annotation.camera_channel - channel_from + 0.5],
+                    size=11 if selected else 9,
+                    pen=pg.mkPen('#ffffff', width=1),
+                    brush=pg.mkBrush(color),
+                    symbol=symbol,
+                )
+                marker.setZValue(36)
+                self.video_das_plot_widget.addItem(marker)
+                self._video_annotation_items.append(marker)
+
+    def _drawVideoPlayhead(self):
+        line = pg.InfiniteLine(
+            pos=0.0,
+            angle=90,
+            movable=False,
+            pen=pg.mkPen('#7c3aed', width=3, style=Qt.DashLine),
+        )
+        line.setZValue(40)
+        line.setToolTip('视频当前播放位置')
+        self.video_das_plot_widget.addItem(line)
+        self.video_playhead_line = line
+        self._video_annotation_items.append(line)
 
     def defaultSpeedRulerPoints(self):
         """Return a visible diagonal in full-data time/global-channel coordinates."""
@@ -1895,6 +3184,10 @@ class MainWindow(QMainWindow):
             printError('请先在文件表中选择要加载和拼接的文件')
             return
 
+        if len(rows) == 1 and self.video_sequence_load_checkbox.isChecked():
+            self.loadVideoSequenceFromStartRow(rows[0])
+            return
+
         self.file_names = [self.files_table_widget.item(row, 0).text() for row in rows]
         self.load_selected_files_button.setEnabled(False)
         self.load_selected_files_button.setText('正在加载…')
@@ -1914,6 +3207,157 @@ class MainWindow(QMainWindow):
             printError(err)
             self.statusBar().showMessage(f'文件加载失败：{err}', 10000)
         finally:
+            QApplication.restoreOverrideCursor()
+            self.load_selected_files_button.setText('确定加载并拼接')
+            self.updatePendingFileSelection()
+
+    def _videoSequencePathsFromStartRow(self, start_row: int):
+        """Use one selected directory row as the start of a same-format sequence."""
+
+        first = self.files_table_widget.item(int(start_row), 0)
+        if first is None:
+            return []
+        suffix = self.dataFileSuffix(first.text())
+        paths = []
+        for row in range(int(start_row), self.files_table_widget.rowCount()):
+            item = self.files_table_widget.item(row, 0)
+            if item is None:
+                continue
+            if self.dataFileSuffix(item.text()) != suffix:
+                continue
+            paths.append(self.dataFilePath(item.text()))
+        return paths
+
+    @staticmethod
+    def _videoSequenceWasCancelled(progress):
+        return progress.wasCanceled() if progress is not None else False
+
+    def loadVideoSequenceFromStartRow(self, start_row: int):
+        """Build a long, display-decimated DAS timeline from one start file.
+
+        This deliberately keeps normal full-resolution imports separate.  It
+        allows a long video comparison to follow every source file without
+        concatenating hours of raw DAS data into memory.
+        """
+
+        if self.das_filter_dialog is not None and self.das_filter_dialog.is_busy():
+            printError('滤波链正在计算，请等待完成后再切换文件')
+            return
+        paths = self._videoSequencePathsFromStartRow(start_row)
+        if not paths:
+            printError('未找到可连续读取的 DAS 文件')
+            return
+
+        suffixes = {self.dataFileSuffix(path) for path in paths}
+        if len(suffixes) != 1:
+            printError('连续视频读取一次只能处理同一种 DAS 文件格式')
+            return
+        suffix = suffixes.pop()
+        progress = QProgressDialog('正在读取连续 DAS 时间轴…', '取消', 0, len(paths) * 2, self)
+        progress.setWindowTitle('视频连续读取')
+        progress.setWindowModality(Qt.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.setAutoClose(True)
+        progress.setValue(0)
+        self.load_selected_files_button.setEnabled(False)
+        self.load_selected_files_button.setText('正在建立连续概览…')
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        QApplication.processEvents()
+
+        try:
+            headers = []
+            sample_counts = []
+            channels_num = None
+            sampling_rate = None
+            for index, path in enumerate(paths):
+                if self._videoSequenceWasCancelled(progress):
+                    raise RuntimeError('已取消连续 DAS 读取')
+                if suffix == '.bin':
+                    header, samples, channels, rate, _endian = read_bin_header(path)
+                    header = tuple(map(float, header[:6]))
+                elif suffix == '.dat':
+                    header_data = np.fromfile(path, dtype='<f4')
+                    minimum_header = 64 if self.is_scouter else 10
+                    if header_data.size <= minimum_header:
+                        raise ValueError(f'{path}: DAT 文件过短，无法读取')
+                    if self.is_scouter:
+                        channels = int(header_data[16])
+                        rate = float(header_data[10])
+                        samples = (header_data.size - 64) // channels
+                    else:
+                        channels = int(header_data[9])
+                        rate = float(header_data[6])
+                        samples = (header_data.size - 10) // channels
+                    header = tuple(map(float, header_data[:6]))
+                else:
+                    raise ValueError(f'不支持的视频连续读取格式：{suffix}')
+                if channels <= 0 or samples <= 0 or rate <= 0:
+                    raise ValueError(f'{path}: 通道数、采样点数或采样率无效')
+                if channels_num is None:
+                    channels_num, sampling_rate = int(channels), float(rate)
+                elif channels != channels_num or not np.isclose(rate, sampling_rate):
+                    raise ValueError(
+                        f'{path}: 通道数或采样率与起始文件不一致，连续读取已停止'
+                    )
+                headers.append(header)
+                sample_counts.append(int(samples))
+                progress.setLabelText(f'正在读取时间轴：{index + 1}/{len(paths)}')
+                progress.setValue(index + 1)
+                QApplication.processEvents()
+
+            data_group = DataGroup.from_files(paths, sample_counts, channels_num, sampling_rate)
+            timeline = DataTimeline.from_data_group(
+                data_group,
+                headers,
+                correction_seconds=self.time_correction_seconds,
+            )
+            stride = max(1, (data_group.total_samples + VIDEO_SEQUENCE_MAX_DISPLAY_SAMPLES - 1)
+                         // VIDEO_SEQUENCE_MAX_DISPLAY_SAMPLES)
+            display_parts = []
+            for index, path in enumerate(paths):
+                if self._videoSequenceWasCancelled(progress):
+                    raise RuntimeError('已取消连续 DAS 读取')
+                if suffix == '.bin':
+                    source = bin2numpy(path, 0, channels_num)
+                else:
+                    source_data = np.fromfile(path, dtype='<f4')
+                    if self.is_scouter:
+                        source = source_data[64:].reshape(channels_num, -1, order='F')
+                    else:
+                        source = source_data[10:].reshape(channels_num, -1)
+                display_parts.append(np.ascontiguousarray(source[:, ::stride], dtype=np.float32))
+                progress.setLabelText(f'正在生成显示概览：{index + 1}/{len(paths)}')
+                progress.setValue(len(paths) + index + 1)
+                QApplication.processEvents()
+
+            display_data = detrendData(np.concatenate(display_parts, axis=1)).astype(np.float32, copy=False)
+            self.video_sequence_data_group = data_group
+            self.video_sequence_timeline = timeline
+            self.video_sequence_display_data = display_data
+            self.video_sequence_display_stride = stride
+            self.video_sequence_source_paths = list(paths)
+            self.video_sequence_selected_segment_index = 0
+            self.updateVideoAnnotationDataContext()
+            self._syncVideoProjectWidgets()
+            self.refreshVideoAnnotationTable(select_identifier=self.video_annotation_selected_id)
+            self.video_sequence_status_label.setText(
+                f'连续 DAS：{len(paths)} 文件 · 显示抽稀 {stride}×'
+            )
+            self.video_sequence_status_label.setToolTip(
+                f'从 {os.path.basename(paths[0])} 开始，连续到 {os.path.basename(paths[-1])}；'
+                f'完整时间轴 {timeline.total_samples} 点，界面显示 {display_data.shape[1]} 点。'
+            )
+            self.plotVideoComparisonImage()
+            self.tab_widget.setCurrentWidget(self.video_compare_container)
+            self.statusBar().showMessage(
+                f'视频连续 DAS 已就绪：{len(paths)} 个文件，显示抽稀 {stride}×。',
+                10000,
+            )
+        except Exception as error:
+            printError(error)
+            self.statusBar().showMessage(f'视频连续 DAS 读取失败：{error}', 10000)
+        finally:
+            progress.close()
             QApplication.restoreOverrideCursor()
             self.load_selected_files_button.setText('确定加载并拼接')
             self.updatePendingFileSelection()
@@ -1945,10 +3389,28 @@ class MainWindow(QMainWindow):
         if not rows:
             self.pending_file_selection_label.setText('待拼接：请选择文件')
             self.load_selected_files_button.setEnabled(False)
+            self.load_selected_files_button.setText('确定加载并拼接')
             return
 
         items = [self.files_table_widget.item(row, 0) for row in rows]
         names = [item.text() for item in items if item is not None]
+        use_video_sequence = len(rows) == 1 and self.video_sequence_load_checkbox.isChecked()
+        if use_video_sequence:
+            paths = self._videoSequencePathsFromStartRow(rows[0])
+            active_paths = [
+                os.path.normcase(os.path.realpath(path))
+                for path in self.video_sequence_source_paths
+            ]
+            pending_paths = [os.path.normcase(os.path.realpath(path)) for path in paths]
+            matches_sequence = bool(paths) and pending_paths == active_paths
+            end_name = os.path.basename(paths[-1]) if paths else names[0]
+            self.pending_file_selection_label.setText(
+                f'视频连续：从 {names[0]} 起按顺序读取 {len(paths)} 个文件，至 {end_name}'
+            )
+            self.load_selected_files_button.setText('从起始文件连续加载')
+            self.load_selected_files_button.setEnabled(not matches_sequence)
+            return
+
         loaded_paths = [] if self.data_group is None else [
             os.path.normcase(os.path.realpath(segment.path))
             for segment in self.data_group.segments
@@ -1962,6 +3424,7 @@ class MainWindow(QMainWindow):
             self.pending_file_selection_label.setText(
                 f'待拼接：{len(names)} 个文件（{names[0]} → {names[-1]}）'
             )
+        self.load_selected_files_button.setText('确定加载并拼接')
         self.load_selected_files_button.setEnabled(not matches_loaded)
 
     def changeChannelNumber(self):
@@ -2097,6 +3560,8 @@ class MainWindow(QMainWindow):
         self.plot_gray_scale_widget.setTimeOrigin(self.data_timeline.start_time)
         self.plot_single_channel_time_widget.setTimeOrigin(self.data_timeline.start_time)
         self.multi_waves_time_axis.setOrigin(self.data_timeline.start_time)
+        if hasattr(self, 'video_das_plot_widget'):
+            self.video_das_plot_widget.setTimeOrigin(self.data_timeline.start_time)
         self.updateEventRangeEditors()
         if self.data_timeline.discontinuities:
             self.statusBar().showMessage(
@@ -2135,6 +3600,7 @@ class MainWindow(QMainWindow):
         self.plotSingleChannelTime()
         self.plotAmplitudeFrequency()
         self.plotMultiWavesImage()
+        self.plotVideoComparisonImage()
 
     def updateAll(self):
         """
@@ -2148,6 +3614,8 @@ class MainWindow(QMainWindow):
         self.updateDataRange()
         self.updateDataParams()
         self.updateDataGPSTime()
+        self.updateVideoAnnotationDataContext()
+        self.refreshVideoAnnotationTable(select_identifier=self.video_annotation_selected_id)
         self.updateImages()
 
     # """------------------------------------------------------------------------------------------------------------"""
@@ -2184,6 +3652,7 @@ class MainWindow(QMainWindow):
 
         time, data = [], []
         previous_filter_shape = tuple(self.raw_data.shape) if self.raw_data is not None else None
+        self._clearVideoSequenceContext()
         self.file_names = sorted(
             self.file_names,
             key=lambda value: natural_sort_key(os.path.basename(str(value))),
@@ -2461,6 +3930,8 @@ class MainWindow(QMainWindow):
         self.rebuildDataTimeline()
         self.updateDataGPSTime()
         self.updateStitchedFilesList()
+        self.updateVideoAnnotationDataContext()
+        self.refreshVideoAnnotationTable(select_identifier=self.video_annotation_selected_id)
         if hasattr(self, 'data'):
             self.updateImages()
         self.statusBar().showMessage(

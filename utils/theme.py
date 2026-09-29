@@ -255,6 +255,12 @@ def apply_application_theme(application) -> None:
             border-bottom-left-radius: 7px;
             border-bottom-right-radius: 7px;
         }}
+        QWidget#videoSurface, QLabel#videoUnavailable {{
+            color: #e5e7eb;
+            background-color: #111827;
+            border: 1px solid #344054;
+            border-radius: 7px;
+        }}
         QGroupBox {{
             font-weight: 600;
             color: {colors["text_primary"]};
