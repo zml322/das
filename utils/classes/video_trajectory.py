@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from fractions import Fraction
 from typing import Dict, List, Tuple
 
 import numpy as np
+from scipy import signal
 
 from .data_group import DataGroup
+from .das_filter import apply_das_filter
 from .vehicle_tracking import (
     VehicleTrajectory,
     pick_vehicle_trajectories,
@@ -84,6 +87,94 @@ def read_group_window(
     return result
 
 
+def _resample_for_display(
+    data: np.ndarray, sampling_rate: float, target_rate: float
+) -> tuple[np.ndarray, float]:
+    """Bound a display window before expensive filtering and plotting."""
+
+    target = min(float(sampling_rate), max(2.5, float(target_rate)))
+    if sampling_rate <= target * 1.05:
+        return np.asarray(data, dtype=np.float32), float(sampling_rate)
+    fraction = Fraction(target / float(sampling_rate)).limit_denominator(2000)
+    reduced = signal.resample_poly(
+        np.asarray(data, dtype=np.float32),
+        fraction.numerator,
+        fraction.denominator,
+        axis=1,
+    )
+    return np.asarray(reduced, dtype=np.float32), (
+        float(sampling_rate) * fraction.numerator / fraction.denominator
+    )
+
+
+def _process_display_data(
+    data: np.ndarray,
+    sampling_rate: float,
+    parameters: Dict[str, object],
+) -> tuple[np.ndarray, float]:
+    """Apply the selected read-only video/DAS display pipeline."""
+
+    mode = str(parameters.get("display_mode", "vehicle"))
+    if mode == "raw":
+        reduced, rate = _resample_for_display(data, sampling_rate, 150.0)
+        return np.asarray(signal.detrend(reduced, axis=1), dtype=np.float32), rate
+
+    if mode == "current":
+        working = np.asarray(data, dtype=np.float32)
+        for step in parameters.get("display_filter_steps", ()):
+            if not bool(step.get("enabled", True)):
+                continue
+            working = apply_das_filter(
+                working,
+                float(sampling_rate),
+                str(step["algorithm"]),
+                dict(step.get("parameters", {})),
+            )
+        return _resample_for_display(working, sampling_rate, 150.0)
+
+    if mode == "vibration":
+        nyquist = float(sampling_rate) / 2.0
+        high = min(50.0, nyquist * 0.9)
+        low = min(5.0, high * 0.5)
+        target = min(float(sampling_rate), max(2.5 * high, 50.0))
+        reduced, rate = _resample_for_display(data, sampling_rate, target)
+        filtered = apply_das_filter(
+            reduced,
+            rate,
+            "bandpass",
+            {
+                "frequency_low": low,
+                "frequency_high": min(high, rate / 2.0 * 0.9),
+                "order": 4,
+                "zero_phase": True,
+            },
+        )
+        return apply_das_filter(filtered, rate, "mad_normalize", {}), rate
+
+    # Vehicle response mode is deliberately cheap enough to follow playback:
+    # anti-alias/downsample first, then expose the low-frequency response with
+    # the same robust per-channel normalization used by the picker.
+    low = float(parameters.get("frequency_low", 0.01))
+    high = float(parameters.get("frequency_high", 1.0))
+    target = min(
+        float(sampling_rate),
+        max(float(parameters.get("target_sampling_rate", 50.0)), 2.5 * high),
+    )
+    reduced, rate = _resample_for_display(data, sampling_rate, target)
+    filtered = apply_das_filter(
+        reduced,
+        rate,
+        "bandpass",
+        {
+            "frequency_low": low,
+            "frequency_high": min(high, rate / 2.0 * 0.9),
+            "order": 4,
+            "zero_phase": True,
+        },
+    )
+    return apply_das_filter(filtered, rate, "mad_normalize", {}), rate
+
+
 def analyze_group_window(
     data_group: DataGroup,
     start_sample: int,
@@ -95,20 +186,25 @@ def analyze_group_window(
     """Run the established picker on a suitable long read-only window."""
 
     data = read_group_window(data_group, start_sample, end_sample, channel_from, channel_to)
-    # This array is retained solely for the current-window image; the full
-    # sequence is never materialised or altered.  The picker repeats the same
-    # deterministic preprocessing internally, keeping its established API.
-    processed_data, processed_rate, _options = prepare_vehicle_tracking_data(
+    processed_data, processed_rate = _process_display_data(
         data, data_group.sampling_rate, parameters
     )
-    trajectories = pick_vehicle_trajectories(
-        data,
-        data_group.sampling_rate,
-        parameters,
-        channel_start=channel_from,
-        time_start=start_sample / data_group.sampling_rate,
-    )
+    trajectories: Tuple[VehicleTrajectory, ...] = ()
+    if bool(parameters.get("detect_trajectories", True)):
+        # Keep detection on the established low-frequency pipeline.  In the
+        # default vehicle display mode this is the same signal family shown to
+        # the user; other display modes remain useful for visual comparison.
+        _tracking_data, _tracking_rate, _options = prepare_vehicle_tracking_data(
+            data, data_group.sampling_rate, parameters
+        )
+        trajectories = tuple(pick_vehicle_trajectories(
+            data,
+            data_group.sampling_rate,
+            parameters,
+            channel_start=channel_from,
+            time_start=start_sample / data_group.sampling_rate,
+        ))
     return VideoTrajectoryWindow(
         int(start_sample), int(end_sample), int(channel_from), int(channel_to),
-        tuple(trajectories), processed_data, float(processed_rate),
+        trajectories, processed_data, float(processed_rate),
     )

@@ -25,6 +25,8 @@ MPEG_PROGRAM_STREAM_PACK = b"\x00\x00\x01\xBA"
 MPEG_PROGRAM_STREAM_END = b"\x00\x00\x01\xB9"
 _START_CODE = b"\x00\x00\x01"
 _PTS_WRAP = 1 << 33
+PLAYBACK_CACHE_FRAME_RATE = 15.0
+PLAYBACK_CACHE_VERSION = "h264-aac-cfr15-preserve-timeline-v2"
 
 
 @dataclass(frozen=True)
@@ -128,6 +130,13 @@ def _last_nonzero_offset(path: Path, block_size: int = 1 << 20) -> int:
 def _ffmpeg_stream_info(path: Path) -> tuple[Optional[float], str, str]:
     """Ask the bundled decoder for authoritative codec names when available."""
     try:
+        # Windows: 隐藏命令行窗口
+        startupinfo = None
+        if os.name == 'nt':
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            startupinfo.wShowWindow = subprocess.SW_HIDE
+
         completed = subprocess.run(
             [bundled_ffmpeg_executable(), "-hide_banner", "-i", str(path)],
             stdout=subprocess.DEVNULL,
@@ -137,6 +146,7 @@ def _ffmpeg_stream_info(path: Path) -> tuple[Optional[float], str, str]:
             errors="replace",
             timeout=20,
             check=False,
+            startupinfo=startupinfo,
         )
     except (OSError, RuntimeError, subprocess.SubprocessError):
         return None, "unknown", "unknown"
@@ -228,7 +238,11 @@ def probe_video(path: str | os.PathLike[str], chunk_size: int = 4 << 20) -> Vide
         tail = stream.read(payload_end - tail_start)
     pts_duration = (last_pts - first_pts) / 90_000.0 if first_pts is not None and last_pts is not None and last_pts >= first_pts else None
     decoded_duration, decoded_video, decoded_audio = _ffmpeg_stream_info(source)
+
+    # FFmpeg and the independent PES scan agree for healthy recorder files;
+    # retain the scan as a fallback when the bundled decoder cannot probe.
     duration = decoded_duration if decoded_duration is not None else pts_duration
+
     video_codec = decoded_video if decoded_video != "unknown" else video_codec
     audio_codec = decoded_audio if decoded_audio != "unknown" else audio_codec
     return VideoProbe(
@@ -290,8 +304,25 @@ def bundled_ffmpeg_executable() -> str:
         ) from error
 
 
+def build_playback_cache_command(
+    source: Path, target: Path, video_args: tuple[str, list[str]]
+) -> list[str]:
+    """Build the timeline-preserving FFmpeg command used by the cache worker."""
+
+    _encoder, encoder_args = video_args
+    return [
+        bundled_ffmpeg_executable(), "-y",
+        "-dts_delta_threshold", "3600", "-fflags", "+genpts", "-i", str(source),
+        "-map", "0:v:0", "-map", "0:a:0?", *encoder_args,
+        "-vf", f"fps={PLAYBACK_CACHE_FRAME_RATE:g}", "-pix_fmt", "yuv420p",
+        "-c:a", "aac", "-b:a", "96k", "-movflags", "+faststart", str(target),
+    ]
+
+
 def cached_playable_video(
-    path: str | os.PathLike[str], cache_dir: str | os.PathLike[str] | None = None
+    path: str | os.PathLike[str],
+    cache_dir: str | os.PathLike[str] | None = None,
+    expected_duration_seconds: Optional[float] = None,
 ) -> Path:
     """Make an H.264/AAC MP4 *only in the independent cache*.
 
@@ -302,13 +333,33 @@ def cached_playable_video(
     source = Path(path)
     stat = source.stat()
     signature = hashlib.sha256(
-        f"{source.resolve()}|{stat.st_size}|{stat.st_mtime_ns}|h264-aac-v1".encode("utf-8")
+        (
+            f"{source.resolve()}|{stat.st_size}|{stat.st_mtime_ns}|"
+            f"{PLAYBACK_CACHE_VERSION}"
+        ).encode("utf-8")
     ).hexdigest()[:16]
     target_dir = Path(cache_dir) if cache_dir is not None else default_video_cache_dir()
     target_dir.mkdir(parents=True, exist_ok=True)
     target = target_dir / f"{source.stem}-{signature}.mp4"
+    expected_duration = (
+        float(expected_duration_seconds)
+        if expected_duration_seconds is not None and expected_duration_seconds > 0
+        else None
+    )
+
+    def duration_is_valid(candidate: Path) -> bool:
+        if expected_duration is None:
+            return True
+        actual_duration, _video_codec, _audio_codec = _ffmpeg_stream_info(candidate)
+        if actual_duration is None:
+            return False
+        tolerance = max(1.0, expected_duration * 0.001)
+        return abs(actual_duration - expected_duration) <= tolerance
+
     if target.is_file() and target.stat().st_size > 0:
-        return target
+        if duration_is_valid(target):
+            return target
+        target.unlink()
     temporary = target.with_suffix(".part.mp4")
     try:
         # Media Foundation is present on supported Windows machines and avoids
@@ -318,28 +369,38 @@ def cached_playable_video(
             ("h264_mf", ["-c:v", "h264_mf", "-b:v", "1200k"]),
             ("libx264", ["-c:v", "libx264", "-preset", "veryfast", "-crf", "22"]),
         )
+        # Windows: 隐藏命令行窗口
+        startupinfo = None
+        if os.name == 'nt':
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            startupinfo.wShowWindow = subprocess.SW_HIDE
+
         completed = None
-        for _encoder, video_args in encoders:
+        for encoder in encoders:
             if temporary.exists():
                 temporary.unlink()
             completed = subprocess.run(
-                [
-                    bundled_ffmpeg_executable(), "-y", "-fflags", "+genpts", "-i", str(source),
-                    "-map", "0:v:0", "-map", "0:a:0?", *video_args, "-pix_fmt", "yuv420p",
-                    "-c:a", "aac", "-b:a", "96k", "-movflags", "+faststart", str(temporary),
-                ],
+                build_playback_cache_command(source, temporary, encoder),
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.PIPE,
                 text=True,
                 encoding="utf-8",
                 errors="replace",
                 check=False,
+                startupinfo=startupinfo,
             )
             if completed.returncode == 0 and temporary.is_file() and temporary.stat().st_size > 0:
                 break
         if completed is None or completed.returncode != 0 or not temporary.is_file() or temporary.stat().st_size == 0:
             detail = completed.stderr.strip().splitlines()[-1] if completed and completed.stderr.strip() else "未知 FFmpeg 错误"
             raise RuntimeError(f"播放缓存转码失败：{detail}")
+        if not duration_is_valid(temporary):
+            actual_duration, _video_codec, _audio_codec = _ffmpeg_stream_info(temporary)
+            actual_text = "未知" if actual_duration is None else f"{actual_duration:.3f} 秒"
+            raise RuntimeError(
+                f"播放缓存时长校验失败：源录像 {expected_duration:.3f} 秒，缓存 {actual_text}"
+            )
         os.replace(temporary, target)
     finally:
         if temporary.exists():

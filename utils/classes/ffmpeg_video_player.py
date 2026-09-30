@@ -10,7 +10,7 @@ from pathlib import Path
 from PyQt5.QtCore import QThread, pyqtSignal
 from PyQt5.QtGui import QImage
 
-from .video_media import bundled_ffmpeg_executable
+from .video_media import PLAYBACK_CACHE_FRAME_RATE, bundled_ffmpeg_executable
 
 
 class FfmpegFrameWorker(QThread):
@@ -38,7 +38,7 @@ class FfmpegFrameWorker(QThread):
         self._process_lock = threading.Lock()
         # Camera recordings are 1280x720.  Decode at a bounded 16:9 display
         # resolution so background playback does not compete with DAS work.
-        self.width, self.height, self.frame_rate = 960, 540, 15.0
+        self.width, self.height, self.frame_rate = 960, 540, PLAYBACK_CACHE_FRAME_RATE
 
     def stop(self):
         self._stop.set()
@@ -58,29 +58,40 @@ class FfmpegFrameWorker(QThread):
             "-vf", f"scale={self.width}:{self.height}", "-pix_fmt", "rgb24",
             "-f", "rawvideo", "pipe:1",
         ]
+
+        # Windows: 隐藏命令行窗口
+        startupinfo = None
+        if subprocess.os.name == 'nt':
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            startupinfo.wShowWindow = subprocess.SW_HIDE
+
         try:
             process = subprocess.Popen(
-                args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL
+                args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL,
+                startupinfo=startupinfo
             )
         except OSError as error:
             self.errorRaised.emit(f"无法启动 FFmpeg 解码器：{error}")
             return
         with self._process_lock:
             self._process = process
-        position = self.start_ms
+        frame_index = 0
         frame_interval = 1.0 / (self.frame_rate * self.playback_rate)
+        playback_started = time.monotonic()
         try:
             while not self._stop.is_set():
-                started = time.monotonic()
                 raw = process.stdout.read(frame_size) if process.stdout is not None else b""
                 if len(raw) != frame_size:
                     break
+                position = self.start_ms + int(round(frame_index * 1000.0 / self.frame_rate))
                 image = QImage(raw, self.width, self.height, self.width * 3, QImage.Format_RGB888).copy()
                 self.frameReady.emit(image, position)
                 if not self.play_continuously:
                     break
-                position += int(round(1000.0 / self.frame_rate))
-                remaining = frame_interval - (time.monotonic() - started)
+                frame_index += 1
+                deadline = playback_started + frame_index * frame_interval
+                remaining = deadline - time.monotonic()
                 if remaining > 0:
                     self._stop.wait(remaining)
         finally:

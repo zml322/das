@@ -17,7 +17,12 @@ if str(PROJECT_ROOT) not in sys.path:
 from utils.bin_reader import bin_window
 from utils.classes.data_group import DataGroup
 from utils.classes.video_annotation import AnnotationProject, trajectory_candidates
-from utils.classes.video_media import cached_mpeg_ps_copy, probe_video
+from utils.classes.video_media import (
+    PLAYBACK_CACHE_FRAME_RATE,
+    build_playback_cache_command,
+    cached_mpeg_ps_copy,
+    probe_video,
+)
 from utils.classes.vehicle_tracking import VehicleTrajectory
 from utils.classes.video_trajectory import analyze_group_window, read_group_window, required_window_seconds
 
@@ -46,6 +51,18 @@ def _write_bin(path: Path, data: np.ndarray, second: int) -> None:
 
 
 class VideoPipelineChecks(unittest.TestCase):
+    def test_playback_cache_command_preserves_timeline_and_uses_fixed_rate(self):
+        command = build_playback_cache_command(
+            Path("camera.mp4"),
+            Path("camera-cache.mp4"),
+            ("libx264", ["-c:v", "libx264"]),
+        )
+        self.assertLess(command.index("-dts_delta_threshold"), command.index("-i"))
+        threshold_index = command.index("-dts_delta_threshold")
+        self.assertEqual(command[threshold_index + 1], "3600")
+        filter_index = command.index("-vf")
+        self.assertEqual(command[filter_index + 1], f"fps={PLAYBACK_CACHE_FRAME_RATE:g}")
+
     def test_mpeg_ps_probe_uses_pts_and_cache_never_targets_source(self):
         with tempfile.TemporaryDirectory(prefix="das-video-media-") as directory:
             root = Path(directory)

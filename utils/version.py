@@ -1,3 +1,3 @@
 """Application version shared by the GUI and packaging scripts."""
 
-__version__ = "2.1.18"
+__version__ = "2.1.19"
