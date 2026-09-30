@@ -1,4 +1,5 @@
 PyQt5
+imageio-ffmpeg
 soundfile
 numpy
 scipy

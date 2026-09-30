@@ -263,6 +263,8 @@ class TrajectoryCandidate:
     identifier: int
     crossing_seconds: float
     residual_ms: float
+    direction: str = "未知"
+    confidence: float = 0.0
 
 
 def trajectory_crossing_time(trajectory: object, camera_channel: int) -> Optional[float]:
@@ -289,7 +291,7 @@ def trajectory_crossing_time(trajectory: object, camera_channel: int) -> Optiona
 
 def trajectory_candidates(
     trajectories: Iterable[object],
-    camera_channel: int,
+    camera_channel: int | Sequence[int],
     target_seconds: float,
     tolerance_seconds: float = 2.0,
 ) -> List[TrajectoryCandidate]:
@@ -297,10 +299,23 @@ def trajectory_candidates(
 
     candidates: List[TrajectoryCandidate] = []
     tolerance = max(0.0, float(tolerance_seconds))
+    if isinstance(camera_channel, Sequence) and not isinstance(camera_channel, (str, bytes)):
+        bounds = tuple(int(value) for value in camera_channel)
+        if len(bounds) != 2:
+            raise ValueError("摄像头通道范围必须包含起止两个通道")
+        camera_start, camera_end = sorted(bounds)
+        target_channel = (camera_start + camera_end) / 2.0
+    else:
+        camera_start = camera_end = int(camera_channel)
+        target_channel = float(camera_start)
     for trajectory in trajectories:
         if not getattr(trajectory, "visible", True):
             continue
-        crossing = trajectory_crossing_time(trajectory, camera_channel)
+        channels = np.asarray(getattr(trajectory, "channels", ()), dtype=float)
+        times = np.asarray(getattr(trajectory, "times", ()), dtype=float)
+        if channels.size < 2 or np.nanmax(channels) < camera_start or np.nanmin(channels) > camera_end:
+            continue
+        crossing = trajectory_crossing_time(trajectory, target_channel)
         if crossing is None:
             continue
         residual_ms = (crossing - float(target_seconds)) * 1000.0
@@ -309,7 +324,12 @@ def trajectory_candidates(
                 identifier = int(getattr(trajectory, "identifier"))
             except (TypeError, ValueError):
                 continue
-            candidates.append(TrajectoryCandidate(identifier, crossing, residual_ms))
+            order = np.argsort(channels)
+            direction = "向通道增大" if np.nanmean(np.diff(times[order])) >= 0 else "向通道减小"
+            quality = float(getattr(trajectory, "quality", 0.0))
+            coverage = float(getattr(trajectory, "coverage", 0.0))
+            confidence = min(1.0, max(0.0, quality * coverage))
+            candidates.append(TrajectoryCandidate(identifier, crossing, residual_ms, direction, confidence))
     return sorted(candidates, key=lambda item: (abs(item.residual_ms), item.identifier))
 
 
@@ -320,11 +340,27 @@ class AnnotationProject:
     video_path: str = ""
     camera_name: str = "摄像头 A"
     camera_channel: int = 1
+    camera_channel_start: Optional[int] = None
+    camera_channel_end: Optional[int] = None
     camera_visible: bool = True
     sync: VideoSync = field(default_factory=VideoSync)
     annotations: List[VideoAnnotation] = field(default_factory=list)
+    calibration_anchors: List[Dict[str, int]] = field(default_factory=list)
     das_context: Dict[str, object] = field(default_factory=dict)
     project_path: str = ""
+
+    @property
+    def camera_channel_range(self) -> tuple[int, int]:
+        """Inclusive physical field-of-view range, compatible with old files."""
+        start = int(self.camera_channel_start or self.camera_channel)
+        end = int(self.camera_channel_end or self.camera_channel)
+        return min(start, end), max(start, end)
+
+    def set_camera_channel_range(self, start: int, end: int) -> None:
+        start, end = sorted((max(1, int(start)), max(1, int(end))))
+        self.camera_channel_start = start
+        self.camera_channel_end = end
+        self.camera_channel = int(round((start + end) / 2))
 
     def next_identifier(self) -> int:
         return max((annotation.identifier for annotation in self.annotations), default=0) + 1
@@ -435,10 +471,17 @@ class AnnotationProject:
                 "path": self.video_path,
                 "camera_name": self.camera_name,
                 "camera_channel": int(self.camera_channel),
+                "camera_channel_start": int(self.camera_channel_range[0]),
+                "camera_channel_end": int(self.camera_channel_range[1]),
                 "camera_visible": bool(self.camera_visible),
             },
             "sync": self.sync.to_dict(),
             "das_context": self.das_context,
+            "calibration_anchors": [
+                {"video_position_ms": int(item["video_position_ms"]), "das_sample": int(item["das_sample"])}
+                for item in self.calibration_anchors
+                if isinstance(item, dict) and "video_position_ms" in item and "das_sample" in item
+            ],
             "annotations": [annotation.to_dict() for annotation in self.annotations],
         }
 
@@ -451,21 +494,41 @@ class AnnotationProject:
         video = value.get("video") if isinstance(value.get("video"), dict) else {}
         try:
             channel = max(1, int(video.get("camera_channel", 1)))
+            channel_start = max(1, int(video.get("camera_channel_start", channel)))
+            channel_end = max(1, int(video.get("camera_channel_end", channel)))
         except (TypeError, ValueError):
             channel = 1
+            channel_start = 1
+            channel_end = 1
         items = value.get("annotations") if isinstance(value.get("annotations"), list) else []
         annotations = [VideoAnnotation.from_dict(item) for item in items]
         identifiers = [item.identifier for item in annotations]
         if len(set(identifiers)) != len(identifiers):
             raise ValueError("标注工程包含重复编号")
         context = value.get("das_context") if isinstance(value.get("das_context"), dict) else {}
+        anchor_values = value.get("calibration_anchors")
+        anchors: List[Dict[str, int]] = []
+        if isinstance(anchor_values, list):
+            for item in anchor_values[-2:]:
+                if not isinstance(item, dict):
+                    continue
+                try:
+                    anchors.append({
+                        "video_position_ms": max(0, int(item["video_position_ms"])),
+                        "das_sample": max(0, int(item["das_sample"])),
+                    })
+                except (KeyError, TypeError, ValueError):
+                    continue
         return cls(
             video_path=str(video.get("path") or ""),
             camera_name=str(video.get("camera_name") or "摄像头 A"),
             camera_channel=channel,
+            camera_channel_start=min(channel_start, channel_end),
+            camera_channel_end=max(channel_start, channel_end),
             camera_visible=bool(video.get("camera_visible", True)),
             sync=VideoSync.from_dict(value.get("sync")),
             annotations=annotations,
+            calibration_anchors=anchors,
             das_context=context,
         )
 

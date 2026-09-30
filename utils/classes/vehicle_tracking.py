@@ -192,6 +192,36 @@ def _downsample(data: np.ndarray, sampling_rate: float, target_rate: float) -> T
     return reduced, sampling_rate * fraction.numerator / fraction.denominator
 
 
+def prepare_vehicle_tracking_data(
+    data: np.ndarray, sampling_rate: float, parameters: Dict[str, object]
+) -> Tuple[np.ndarray, float, Dict[str, object]]:
+    """Run the non-mutating preprocessing shared by picker and video view.
+
+    Keeping this stage public lets the long-video workflow display precisely
+    the bad-channel-repaired, band-passed, downsampled data on which it bases
+    its trajectory candidates.  The caller receives a new array.
+    """
+    array = np.asarray(data, dtype=np.float64)
+    if array.ndim != 2 or min(array.shape) == 0:
+        raise ValueError("车辆轨迹拾取需要非空的二维 DAS 数据（通道 × 采样点）")
+    options = _validate_parameters(array.shape, float(sampling_rate), parameters)
+    if not np.all(np.isfinite(array)):
+        raise ValueError("输入数据含有 NaN 或无穷值，无法进行车辆轨迹拾取")
+    working = array.copy()
+    low = float(options["frequency_low"])
+    high = float(options["frequency_high"])
+    sos = signal.butter(4, [low, high], btype="bandpass", fs=float(sampling_rate), output="sos")
+    # Repair dead/saturated traces before the zero-phase filter.  A bad trace
+    # otherwise smears its transient across the long low-frequency window.
+    repaired = _replace_bad_traces(working)
+    filtered = signal.sosfiltfilt(sos, repaired, axis=1)
+    normalized = _robust_trace_normalize(filtered)
+    tracking_data, tracking_rate = _downsample(
+        normalized, float(sampling_rate), float(options["target_sampling_rate"])
+    )
+    return tracking_data, tracking_rate, options
+
+
 def _peaks_for_trace(
     trace: np.ndarray,
     sampling_rate: float,
@@ -437,21 +467,8 @@ def pick_vehicle_trajectories(
         time_start: Full-data time in seconds corresponding to ``data[:, 0]``.
     """
 
-    array = np.asarray(data, dtype=np.float64)
-    if array.ndim != 2 or min(array.shape) == 0:
-        raise ValueError("车辆轨迹拾取需要非空的二维 DAS 数据（通道 × 采样点）")
-    options = _validate_parameters(array.shape, float(sampling_rate), parameters)
-    array = array.copy()
-    if not np.all(np.isfinite(array)):
-        raise ValueError("输入数据含有 NaN 或无穷值，无法进行车辆轨迹拾取")
-
-    low = float(options["frequency_low"])
-    high = float(options["frequency_high"])
-    sos = signal.butter(4, [low, high], btype="bandpass", fs=float(sampling_rate), output="sos")
-    filtered = signal.sosfiltfilt(sos, array, axis=1)
-    tracking_data = _robust_trace_normalize(_replace_bad_traces(filtered))
-    tracking_data, tracking_rate = _downsample(
-        tracking_data, float(sampling_rate), float(options["target_sampling_rate"])
+    tracking_data, tracking_rate, options = prepare_vehicle_tracking_data(
+        data, sampling_rate, parameters
     )
 
     peak_locations: List[np.ndarray] = []

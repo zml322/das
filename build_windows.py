@@ -37,6 +37,10 @@ def main() -> None:
         str(work_path),
         "--icon",
         str(PROJECT_ROOT / "image" / "favicon.ico"),
+        "--collect-data",
+        "imageio_ffmpeg",
+        "--hidden-import",
+        "imageio_ffmpeg",
         str(PROJECT_ROOT / "main.py"),
     ]
     print("Building", APP_NAME)
@@ -46,4 +50,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

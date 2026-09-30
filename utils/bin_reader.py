@@ -109,3 +109,33 @@ def bin2numpy(file_path, ch1=0, ch2=None):
 
     # 截取你需要的道数范围并返回（加上 astype 确保内存连续性，保护后续 pytorch 运算不报错）
     return data_matrix[ch1:ch2].astype(np.float32, copy=False)
+
+
+
+def bin_window(file_path, sample_start, sample_end, ch1=0, ch2=None):
+    """Read a channel/time rectangle without materialising the whole BIN.
+
+    The file layout is channel-major, so each requested trace is read as one
+    contiguous span.  This keeps long video comparison analysis read-only and
+    bounded by its local time window rather than the complete sequence.
+    """
+    _header, sampling_times, channels_num, _sampling_rate, endian = read_bin_header(file_path)
+    start = max(0, int(sample_start))
+    end = min(int(sample_end), sampling_times)
+    if ch2 is None:
+        ch2 = channels_num
+    ch1, ch2 = int(ch1), int(ch2)
+    if not (0 <= ch1 < ch2 <= channels_num) or end <= start:
+        raise ValueError(f"{file_path}: 窗口或通道范围无效")
+    count = end - start
+    result = np.empty((ch2 - ch1, count), dtype=np.float32)
+    item_size = np.dtype(endian + "f4").itemsize
+    with open(file_path, "rb") as stream:
+        for output_channel, source_channel in enumerate(range(ch1, ch2)):
+            offset = HEADER_BYTES + (source_channel * sampling_times + start) * item_size
+            stream.seek(offset)
+            values = np.fromfile(stream, dtype=endian + "f4", count=count)
+            if values.size != count:
+                raise ValueError(f"{file_path}: BIN 窗口数据不足")
+            result[output_channel] = values
+    return result
