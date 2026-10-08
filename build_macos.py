@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -54,6 +55,8 @@ def main() -> None:
         str(work_path),
         '--specpath',
         str(work_path),
+        '--add-data',
+        f"{PROJECT_ROOT / 'image' / 'img.png'}{os.pathsep}image",
     ]
 
     icon_path = PROJECT_ROOT / 'image' / 'favicon.icns'

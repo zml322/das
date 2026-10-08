@@ -682,7 +682,7 @@ class DASFilterDialog(QDialog):
         self.channel_spacing.setRange(0.001, 100000.0)
         self.channel_spacing.setDecimals(3)
         self.channel_spacing.setSingleStep(0.1)
-        self.channel_spacing.setValue(1.0)
+        self.channel_spacing.setValue(4.0)
         self.channel_spacing.setSuffix(" m")
         self.channel_spacing.setMaximumWidth(150)
         parameter_form.addRow("相邻通道距离 dx", self.channel_spacing)

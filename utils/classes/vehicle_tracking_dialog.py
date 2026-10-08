@@ -194,7 +194,8 @@ class VehicleTrackingDialog(QDialog):
         basic_form = QFormLayout(basic_group)
         self.channel_spacing = QLineEdit()
         self.channel_spacing.setValidator(QDoubleValidator(0.000001, 1_000_000.0, 6, self))
-        self.channel_spacing.setPlaceholderText("必填，例如 2.0")
+        self.channel_spacing.setText("4.0")
+        self.channel_spacing.setPlaceholderText("默认 4.0")
         self.channel_spacing.setToolTip("真实相邻通道距离 dx（米），不能填写 gauge length")
         basic_form.addRow("相邻通道距离 dx", self.channel_spacing)
 

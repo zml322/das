@@ -37,6 +37,8 @@ def main() -> None:
         str(work_path),
         "--icon",
         str(PROJECT_ROOT / "image" / "favicon.ico"),
+        "--add-data",
+        f"{PROJECT_ROOT / 'image' / 'img.png'};image",
         "--collect-data",
         "imageio_ffmpeg",
         "--hidden-import",

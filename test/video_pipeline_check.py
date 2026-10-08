@@ -206,8 +206,8 @@ class VideoPipelineChecks(unittest.TestCase):
                 "polarity": "auto",
             })
             self.assertEqual((window.start_sample, window.end_sample), (0, 2_000))
-            self.assertEqual(window.processed_data.shape[0], 8)
-            self.assertAlmostEqual(window.processed_sampling_rate, 5.0)
+            self.assertEqual(window.processed_data.shape, (8, 2_000))
+            self.assertAlmostEqual(window.processed_sampling_rate, 10.0)
 
     def test_range_and_two_point_calibration_evidence_round_trip(self):
         project = AnnotationProject(camera_channel=4)
@@ -217,7 +217,8 @@ class VideoPipelineChecks(unittest.TestCase):
             {"video_position_ms": 101_000, "das_sample": 101_520},
         ]
         restored = AnnotationProject.from_dict(project.to_dict())
-        self.assertEqual(restored.camera_channel_range, (4, 12))
+        self.assertEqual(restored.camera_channel, 8)
+        self.assertEqual(restored.camera_channel_range, (8, 8))
         self.assertEqual(restored.calibration_anchors, project.calibration_anchors)
 
 

@@ -29,6 +29,35 @@ class AbsoluteTimeAxisItem(pg.AxisItem):
         self._origin = origin
         self.update()
 
+    def tickSpacing(self, minVal, maxVal, size):
+        """Align relative plot ticks to round wall-clock boundaries."""
+
+        levels = super().tickSpacing(minVal, maxVal, size)
+        if self._origin is None:
+            return levels
+        origin_microseconds = (
+            (
+                self._origin.toordinal() * 86400
+                + self._origin.hour * 3600
+                + self._origin.minute * 60
+                + self._origin.second
+            ) * 1_000_000
+            + self._origin.microsecond
+        )
+        aligned = []
+        for spacing, _offset in levels:
+            spacing = float(spacing)
+            if not np.isfinite(spacing) or spacing <= 0:
+                aligned.append((spacing, 0.0))
+                continue
+            # AxisItem applies this offset in relative seconds.  Shifting by
+            # the wall-clock phase makes, for example, 13:44:20 land on a
+            # major tick even when the first DAS sample is at xx:xx:00.280.
+            spacing_microseconds = max(1, int(round(spacing * 1_000_000)))
+            offset = ((-origin_microseconds) % spacing_microseconds) / 1_000_000.0
+            aligned.append((spacing, offset))
+        return aligned
+
     def tickStrings(self, values, scale, spacing):
         if self._origin is None:
             return super().tickStrings(values, scale, spacing)
@@ -42,9 +71,7 @@ class AbsoluteTimeAxisItem(pg.AxisItem):
         except (AttributeError, TypeError, ValueError, OverflowError):
             crosses_date = False
         show_date = span >= 12 * 3600 or crosses_date
-        show_milliseconds = span < 3600 and (
-            abs(float(spacing)) < 1.0 or self._origin.microsecond != 0
-        )
+        show_milliseconds = span < 3600 and abs(float(spacing)) < 1.0
         result = []
         for value in values:
             moment = self._origin + timedelta(seconds=float(value))

@@ -351,16 +351,21 @@ class AnnotationProject:
 
     @property
     def camera_channel_range(self) -> tuple[int, int]:
-        """Inclusive physical field-of-view range, compatible with old files."""
-        start = int(self.camera_channel_start or self.camera_channel)
-        end = int(self.camera_channel_end or self.camera_channel)
-        return min(start, end), max(start, end)
+        """Deprecated range view retained for old callers and project files."""
+        channel = max(1, int(self.camera_channel))
+        return channel, channel
+
+    def set_camera_channel(self, channel: int) -> None:
+        """Set the single DAS channel represented by the camera overlay."""
+        channel = max(1, int(channel))
+        self.camera_channel = channel
+        self.camera_channel_start = channel
+        self.camera_channel_end = channel
 
     def set_camera_channel_range(self, start: int, end: int) -> None:
+        """Import a legacy range as its centre single camera channel."""
         start, end = sorted((max(1, int(start)), max(1, int(end))))
-        self.camera_channel_start = start
-        self.camera_channel_end = end
-        self.camera_channel = int(round((start + end) / 2))
+        self.set_camera_channel(int(round((start + end) / 2)))
 
     def next_identifier(self) -> int:
         return max((annotation.identifier for annotation in self.annotations), default=0) + 1
@@ -523,8 +528,8 @@ class AnnotationProject:
             video_path=str(video.get("path") or ""),
             camera_name=str(video.get("camera_name") or "摄像头 A"),
             camera_channel=channel,
-            camera_channel_start=min(channel_start, channel_end),
-            camera_channel_end=max(channel_start, channel_end),
+            camera_channel_start=channel,
+            camera_channel_end=channel,
             camera_visible=bool(video.get("camera_visible", True)),
             sync=VideoSync.from_dict(value.get("sync")),
             annotations=annotations,

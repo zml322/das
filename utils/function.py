@@ -6,7 +6,9 @@
 """
 import base64
 import os
+import sys
 import tempfile
+from pathlib import Path
 from typing import Union, Optional
 
 import numpy as np
@@ -19,6 +21,12 @@ from utils.widget import MyPlotWidget
 
 DAS_FILE_FILTER = 'DAS data (*.dat *.bin)'
 DAS_FILE_SUFFIXES = ('.dat', '.bin')
+
+
+def resourcePath(relative_path: str) -> str:
+    """Return an asset path in source runs and PyInstaller bundles."""
+    bundle_root = Path(getattr(sys, '_MEIPASS', Path(__file__).resolve().parents[1]))
+    return str(bundle_root / relative_path)
 
 
 def printError(err: Union[Exception, str]) -> None:

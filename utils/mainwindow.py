@@ -19,7 +19,7 @@ try:
 except ImportError:  # Keep the viewer usable on minimal PyQt installations.
     QVideoWidget = None
 from PyQt5.QtCore import Qt, QUrl, QEvent, QRectF, QTimer, QDateTime
-from PyQt5.QtGui import QBrush, QColor, QPen, QPixmap
+from PyQt5.QtGui import QBrush, QColor, QIcon, QPen, QPixmap
 from PyQt5.QtWidgets import QApplication, QMainWindow, QFileDialog, qApp, QTabWidget, QTableWidget, QAbstractItemView, \
     QTableWidgetItem, QHeaderView, QTabBar, QScrollBar, QHBoxLayout, QDoubleSpinBox, QSplitter, QVBoxLayout, QWidget, \
     QFormLayout, QGroupBox, QListWidget, QListWidgetItem, QGraphicsRectItem, QDateTimeEdit, QCheckBox, QSizePolicy, QSlider, \
@@ -81,10 +81,11 @@ from .version import __version__
 
 VIDEO_TRAJECTORY_REQUESTED_WINDOW_SECONDS = 240.0
 VIDEO_TRAJECTORY_PREFETCH_SECONDS = 120.0
-VIDEO_DISPLAY_WINDOW_SECONDS = 60.0
-VIDEO_FOLLOW_WINDOW_SECONDS = 45.0
+VIDEO_DISPLAY_WINDOW_SECONDS = 240.0
+VIDEO_FOLLOW_WINDOW_SECONDS = 240.0
 VIDEO_DAS_MATCH_MARGIN_SECONDS = 30.0
 VIDEO_FILTER_PREVIEW_MAX_VALUES = 5_000_000
+IMAGE_LEVEL_SAMPLE_LIMIT = 2_000_000
 
 
 class FileSegmentBarItem(QGraphicsRectItem):
@@ -249,6 +250,7 @@ class MainWindow(QMainWindow):
         self.video_sync_calibration_anchors = []
         self._video_sync_undo_stack = []
         self._video_sync_pick_mode = None
+        self._video_playhead_dragging = False
         self._video_focus_mode = False
         self.video_trajectory_parameters = None
         self.video_trajectory_window_seconds = None
@@ -298,7 +300,7 @@ class MainWindow(QMainWindow):
         """
         self.menu_bar = self.menuBar()  # 菜单栏
         self.setWindowTitle(f'DAS数据查看 v{__version__}')
-        setPicture(self, icon_jpg, 'icon.jpg', window_icon=True)
+        self.setWindowIcon(QIcon(resourcePath('image/img.png')))
 
         # AppUserModelID 仅适用于 Windows；macOS/Linux 没有 ctypes.windll。
         if sys.platform == 'win32':
@@ -1172,10 +1174,7 @@ class MainWindow(QMainWindow):
         self.video_camera_channel_spin_box = SpinBox()
         self.video_camera_channel_spin_box.setRange(1, 1)
         self.video_camera_channel_spin_box.setKeyboardTracking(False)
-        self.video_camera_channel_end_spin_box = SpinBox()
-        self.video_camera_channel_end_spin_box.setRange(1, 1)
-        self.video_camera_channel_end_spin_box.setKeyboardTracking(False)
-        self.video_camera_channel_apply_button = PushButton('设置范围')
+        self.video_camera_channel_apply_button = PushButton('设置通道')
         self.video_camera_visible_checkbox = QCheckBox('显示摄像头通道线')
         self.video_camera_visible_checkbox.setChecked(True)
         self.video_follow_checkbox = QCheckBox('播放时跟随')
@@ -1189,8 +1188,12 @@ class MainWindow(QMainWindow):
         self.video_window_combo = ComboBox()
         for seconds in (30, 60, 120, 240):
             self.video_window_combo.addItem(f'{seconds} s', seconds)
-        self.video_window_combo.setCurrentIndex(1)
-        self.video_window_combo.setToolTip('播放跟随时右侧波形的可见时间窗长度')
+        self.video_window_combo.setCurrentIndex(
+            self.video_window_combo.findData(int(VIDEO_DISPLAY_WINDOW_SECONDS))
+        )
+        self.video_window_combo.setToolTip(
+            '播放跟随时右侧 DAS 的可见时间窗；后台会提前预读后续数据以连续滚动'
+        )
         self.video_filter_button = PushButton('二维滤波…')
         self.video_filter_button.setToolTip('打开与主数据页相同的二维滤波窗口，按顺序叠加显示滤波')
         self.video_filter_summary_label = Label('车辆事件增强')
@@ -1207,16 +1210,16 @@ class MainWindow(QMainWindow):
         self.video_sequence_status_label.setObjectName('secondaryLabel')
         self.video_sequence_status_label.setWordWrap(True)
         self.video_sequence_status_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
-        self.video_trajectory_status_label = Label('轨迹：等待匹配 DAS 与 dx 标定')
+        self.video_trajectory_status_label = Label('轨迹：等待匹配 DAS')
         self.video_trajectory_status_label.setObjectName('secondaryLabel')
         self.video_trajectory_status_label.setWordWrap(True)
         self.video_trajectory_status_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         self.video_trajectory_dx_spin_box = QDoubleSpinBox()
-        self.video_trajectory_dx_spin_box.setRange(0.0, 1_000_000.0)
-        self.video_trajectory_dx_spin_box.setDecimals(6)
+        self.video_trajectory_dx_spin_box.setRange(0.001, 1_000_000.0)
+        self.video_trajectory_dx_spin_box.setDecimals(3)
         self.video_trajectory_dx_spin_box.setSingleStep(0.1)
         self.video_trajectory_dx_spin_box.setSuffix(' m')
-        self.video_trajectory_dx_spin_box.setSpecialValueText('未标定')
+        self.video_trajectory_dx_spin_box.setValue(4.0)
         self.video_trajectory_dx_spin_box.setKeyboardTracking(False)
         das_controls = QVBoxLayout()
         das_controls.setContentsMargins(0, 0, 0, 0)
@@ -1224,10 +1227,8 @@ class MainWindow(QMainWindow):
         camera_controls = QHBoxLayout()
         camera_controls.setContentsMargins(0, 0, 0, 0)
         camera_controls.setSpacing(6)
-        camera_controls.addWidget(Label('摄像头范围'))
+        camera_controls.addWidget(Label('摄像头通道'))
         camera_controls.addWidget(self.video_camera_channel_spin_box)
-        camera_controls.addWidget(Label('至'))
-        camera_controls.addWidget(self.video_camera_channel_end_spin_box)
         camera_controls.addWidget(self.video_camera_channel_apply_button)
         camera_controls.addWidget(self.video_camera_visible_checkbox)
         camera_controls.addWidget(self.video_follow_checkbox)
@@ -1350,11 +1351,16 @@ class MainWindow(QMainWindow):
 
         sync_group = QGroupBox('视频对时')
         sync_form = QFormLayout(sync_group)
+        self.video_sync_form = sync_form
         sync_form.setContentsMargins(8, 8, 8, 8)
         self.video_start_time_edit = QDateTimeEdit()
         self.video_start_time_edit.setDisplayFormat('yyyy-MM-dd HH:mm:ss.zzz')
         self.video_start_time_edit.setCalendarPopup(True)
         self.video_start_time_edit.setKeyboardTracking(False)
+        self.video_start_time_edit.setAccessibleName('视频开始时间')
+        self.video_start_time_edit.setToolTip(
+            '修改完成后自动应用；也可拖动右侧紫色虚线，用当前视频帧反算开始时间'
+        )
         self.video_sync_offset_spin_box = QDoubleSpinBox()
         self.video_sync_offset_spin_box.setRange(-3600.0, 3600.0)
         self.video_sync_offset_spin_box.setDecimals(3)
@@ -1377,19 +1383,6 @@ class MainWindow(QMainWindow):
         self.video_sync_anchor_button.setToolTip('记录两个相隔较远的同一事件点，同时校正偏移和时钟漂移')
         self.video_sync_undo_button = PushButton('撤销校正')
         self.video_sync_reset_button = PushButton('恢复初始')
-        sync_pick_buttons = QWidget()
-        sync_pick_layout = QHBoxLayout(sync_pick_buttons)
-        sync_pick_layout.setContentsMargins(0, 0, 0, 0)
-        sync_pick_layout.setSpacing(5)
-        sync_pick_layout.addWidget(self.video_sync_single_button)
-        sync_pick_layout.addWidget(self.video_sync_anchor_button)
-        sync_history_buttons = QWidget()
-        sync_history_layout = QHBoxLayout(sync_history_buttons)
-        sync_history_layout.setContentsMargins(0, 0, 0, 0)
-        sync_history_layout.setSpacing(5)
-        sync_history_layout.addWidget(self.video_sync_apply_button)
-        sync_history_layout.addWidget(self.video_sync_undo_button)
-        sync_history_layout.addWidget(self.video_sync_reset_button)
         self.video_sync_state_label = Label('等待选择视频')
         self.video_sync_state_label.setObjectName('statusBadge')
         self.video_sync_state_label.setWordWrap(True)
@@ -1399,12 +1392,6 @@ class MainWindow(QMainWindow):
         self.video_sync_hint_label.setObjectName('secondaryLabel')
         self.video_sync_hint_label.setWordWrap(True)
         sync_form.addRow('视频开始时间', self.video_start_time_edit)
-        sync_form.addRow('手工偏移', self.video_sync_offset_spin_box)
-        sync_form.addRow('时钟倍率', self.video_sync_rate_spin_box)
-        sync_form.addRow(sync_pick_buttons)
-        sync_form.addRow(sync_history_buttons)
-        sync_form.addRow(self.video_sync_state_label)
-        sync_form.addRow(self.video_sync_hint_label)
         layout.addWidget(sync_group)
 
         mark_group = QGroupBox('人工标注')
@@ -1478,6 +1465,7 @@ class MainWindow(QMainWindow):
         self.annotation_open_button.clicked.connect(self.openVideoAnnotationProject)
         self.annotation_save_button.clicked.connect(self.saveVideoAnnotationProject)
         self.annotation_export_button.clicked.connect(self.exportVideoAnnotationsCsv)
+        self.video_start_time_edit.editingFinished.connect(self.applyVideoSync)
         self.video_sync_apply_button.clicked.connect(self.applyVideoSync)
         self.video_sync_single_button.clicked.connect(
             lambda: self._beginVideoSyncPick('single')
@@ -1531,11 +1519,9 @@ class MainWindow(QMainWindow):
 
     def _videoChannelBounds(self):
         group, _timeline = self._videoDataContext()
-        if self.video_sequence_data_group is not None and group is not None:
+        if group is not None:
             return 1, int(group.channel_count)
-        if not hasattr(self, 'channel_from_num') or not hasattr(self, 'channel_to_num'):
-            return 1, 1
-        return int(self.channel_from_num), int(self.channel_to_num)
+        return 1, 1
 
     def _annotationTimeline(self):
         _group, timeline = self._videoDataContext()
@@ -1573,7 +1559,6 @@ class MainWindow(QMainWindow):
         self.video_das_load_button.setEnabled(has_sync)
         for widget in (
                 self.video_camera_channel_spin_box,
-                self.video_camera_channel_end_spin_box,
                 self.video_camera_channel_apply_button,
                 self.video_trajectory_dx_spin_box,
                 self.video_camera_visible_checkbox,
@@ -1590,6 +1575,7 @@ class MainWindow(QMainWindow):
                 self.video_sync_anchor_button,
         ):
             widget.setEnabled(can_mark)
+        self.video_start_time_edit.setEnabled(has_video)
         self.video_sync_apply_button.setEnabled(has_video)
         self.annotation_interval_finish_button.setEnabled(
             can_mark and self.video_annotation_interval_start_ms is not None
@@ -1626,15 +1612,12 @@ class MainWindow(QMainWindow):
 
         project = self.video_annotation_project
         self.video_camera_channel_spin_box.blockSignals(True)
-        self.video_camera_channel_end_spin_box.blockSignals(True)
         self.video_camera_visible_checkbox.blockSignals(True)
         self.video_start_time_edit.blockSignals(True)
         self.video_sync_offset_spin_box.blockSignals(True)
         self.video_sync_rate_spin_box.blockSignals(True)
         try:
-            camera_start, camera_end = project.camera_channel_range
-            self.video_camera_channel_spin_box.setValue(max(1, camera_start))
-            self.video_camera_channel_end_spin_box.setValue(max(1, camera_end))
+            self.video_camera_channel_spin_box.setValue(max(1, project.camera_channel))
             self.video_camera_visible_checkbox.setChecked(project.camera_visible)
             if project.sync.video_start_time is not None:
                 self.video_start_time_edit.setDateTime(QDateTime(project.sync.video_start_time))
@@ -1642,7 +1625,6 @@ class MainWindow(QMainWindow):
             self.video_sync_rate_spin_box.setValue(project.sync.rate)
         finally:
             self.video_camera_channel_spin_box.blockSignals(False)
-            self.video_camera_channel_end_spin_box.blockSignals(False)
             self.video_camera_visible_checkbox.blockSignals(False)
             self.video_start_time_edit.blockSignals(False)
             self.video_sync_offset_spin_box.blockSignals(False)
@@ -1726,7 +1708,8 @@ class MainWindow(QMainWindow):
             )
             return
         self.video_sync_summary_label.setText(
-            f'推荐并已核对：{video_start.date()} {period} DAS，{folder_text}；仍须用两次车辆事件校准偏移与漂移。'
+            f'推荐并已核对：{video_start.date()} {period} DAS，{folder_text}；'
+            '可拖动右侧紫色虚线校正当前视频帧。'
         )
 
     def _videoSourceDurationMs(self) -> int:
@@ -1830,11 +1813,11 @@ class MainWindow(QMainWindow):
             self._markVideoAnnotationDirty()
             if parsed_start is None:
                 self.video_sync_hint_label.setText(
-                    '未能从文件名识别开始时间，请在此手工填写后点击”应用对时”。'
+                    '未能从文件名识别开始时间，请手工填写视频开始时间。'
                 )
             else:
                 self.video_sync_hint_label.setText(
-                    '文件名与 DAS 的”+12 秒”仅作初始对时；请用两次明确车辆事件校正偏移和长录像漂移。'
+                    '文件名时间作为初始值；可拖动紫色虚线对准同一车辆事件。'
                 )
         self.video_das_match_required = True
         if hasattr(self, 'sidebar_tabs'):
@@ -2164,7 +2147,11 @@ class MainWindow(QMainWindow):
             f'DAS {format_wall_time(wall_time)}  |  样点 {sample}'
         )
         if self.video_playhead_line is not None:
-            self.video_playhead_line.setPos(seconds)
+            if not self._video_playhead_dragging:
+                self.video_playhead_line.setPos(seconds)
+                self._setVideoPlayheadTooltip(
+                    self.video_playhead_line, sample, wall_time
+                )
         if self.video_follow_checkbox.isChecked() and self.video_das_plot_widget is not None:
             view_box = self.video_das_plot_widget.getViewBox()
             maximum = timeline.total_samples / sampling_rate
@@ -2180,6 +2167,64 @@ class MainWindow(QMainWindow):
             target_right = min(maximum, target_left + width)
             view_box.setXRange(target_left, target_right, padding=0)
         self._requestVideoTrajectoryForPosition(position_ms)
+
+    def _videoPlayheadTarget(self, line):
+        """Return the DAS sample and wall time represented by a cursor line."""
+
+        timeline = self._annotationTimeline()
+        if timeline is None:
+            return None
+        seconds = min(
+            max(float(line.value()), 0.0),
+            timeline.total_samples / float(timeline.sampling_rate),
+        )
+        sample = min(
+            max(int(round(seconds * float(timeline.sampling_rate))), 0),
+            timeline.total_samples,
+        )
+        return sample, timeline.absolute_time_for_sample(sample)
+
+    @staticmethod
+    def _setVideoPlayheadTooltip(line, sample: int, wall_time: datetime):
+        line.setToolTip(
+            f'DAS 时间：{format_wall_time(wall_time)}\n样点：{sample}\n'
+            '拖动紫色虚线并松开，可校正当前视频帧'
+        )
+
+    def _videoPlayheadDragged(self, line):
+        """Pause playback and preview the DAS time underneath the dragged cursor."""
+
+        if not self._video_playhead_dragging:
+            self._video_playhead_dragging = True
+            if self.video_playback_backend == 'ffmpeg':
+                self.video_ffmpeg_playing = False
+                self._stopFfmpegVideoWorker()
+                self.video_play_button.setText('播放')
+            elif self.video_player is not None:
+                self.video_player.pause()
+        target = self._videoPlayheadTarget(line)
+        if target is None:
+            return
+        sample, wall_time = target
+        self._setVideoPlayheadTooltip(line, sample, wall_time)
+        self.video_current_das_label.setText(
+            f'DAS {format_wall_time(wall_time)}  |  样点 {sample}'
+        )
+        self.video_sync_summary_label.setText(
+            f'拖动对时：松开后，当前视频帧将对应 DAS {format_wall_time(wall_time)}。'
+        )
+
+    def _videoPlayheadMoveFinished(self, line):
+        """Commit one drag as a single-start-time video/DAS calibration."""
+
+        if not self._video_playhead_dragging:
+            return
+        self._video_playhead_dragging = False
+        target = self._videoPlayheadTarget(line)
+        if target is None:
+            return
+        sample, _wall_time = target
+        self._alignCurrentVideoToDasSample(sample)
 
     def _beginVideoSyncPick(self, mode: str):
         """Pause playback and let the next DAS click establish correspondence."""
@@ -2362,7 +2407,7 @@ class MainWindow(QMainWindow):
         self._updateVideoPlayhead(position, force=True)
 
     def _alignCurrentVideoToDasSample(self, sample: int):
-        """Make the paused/current video position correspond to one DAS sample."""
+        """Derive the sole video start time from one video-frame/DAS match."""
 
         timeline = self._annotationTimeline()
         sync = self.video_annotation_project.sync
@@ -2375,12 +2420,11 @@ class MainWindow(QMainWindow):
             self.video_player.pause()
         position_ms = self._currentVideoPosition()
         target_time = timeline.absolute_time_for_sample(sample)
-        offset = (
-            (target_time - sync.video_start_time).total_seconds()
-            - position_ms / 1000.0 * sync.rate
-        )
+        start_time = target_time - timedelta(seconds=position_ms / 1000.0)
         self._pushVideoSyncUndo()
-        sync.update(sync.video_start_time, offset, sync.rate)
+        sync.update(start_time, 0.0, 1.0)
+        self.video_annotation_project.calibration_anchors = []
+        self.video_sync_calibration_anchors = []
         moved = self.video_annotation_project.reproject_video_annotations(timeline)
         self._markVideoAnnotationDirty()
         self._syncVideoProjectWidgets()
@@ -2388,8 +2432,9 @@ class MainWindow(QMainWindow):
         self.plotVideoComparisonImage()
         self._updateVideoPlayhead(position_ms, force=True)
         self.video_sync_summary_label.setText(
-            f'已建立手工对时锚点：视频 {format_video_position(position_ms)} '
-            f'→ DAS {format_wall_time(target_time)}；重新定位 {moved} 条标签。'
+            f'拖动对时已应用：视频 {format_video_position(position_ms)} '
+            f'→ DAS {format_wall_time(target_time)}；视频开始时间已更新为 '
+            f'{format_wall_time(start_time)}，重新定位 {moved} 条标签。'
         )
 
     def _recordVideoCalibrationAnchor(self, sample: int):
@@ -2455,11 +2500,14 @@ class MainWindow(QMainWindow):
         if self._annotationTimeline() is None:
             return
         channel_from, channel_to = self._videoChannelBounds()
-        start = min(max(channel_from, int(self.video_camera_channel_spin_box.value())), channel_to)
-        end = min(max(channel_from, int(self.video_camera_channel_end_spin_box.value())), channel_to)
-        self.video_annotation_project.set_camera_channel_range(start, end)
+        channel = min(max(channel_from, int(self.video_camera_channel_spin_box.value())), channel_to)
+        self.video_annotation_project.set_camera_channel(channel)
         self._markVideoAnnotationDirty()
-        self._configureVideoTrajectoryAnalysis()
+        annotation = self.video_annotation_project.annotation_by_identifier(
+            self.video_annotation_selected_id
+        )
+        if annotation is not None:
+            self._refreshAnnotationTrajectoryChoices(annotation)
         self.plotVideoComparisonImage()
 
     def _videoCameraLineMoved(self, line):
@@ -2472,17 +2520,18 @@ class MainWindow(QMainWindow):
             max(channel_from, int(round(local_channel - 0.5 + plot_origin))),
             channel_to,
         )
-        self.video_annotation_project.set_camera_channel_range(global_channel, global_channel)
+        self.video_annotation_project.set_camera_channel(global_channel)
         self.video_camera_channel_spin_box.blockSignals(True)
-        self.video_camera_channel_end_spin_box.blockSignals(True)
         try:
             self.video_camera_channel_spin_box.setValue(global_channel)
-            self.video_camera_channel_end_spin_box.setValue(global_channel)
         finally:
             self.video_camera_channel_spin_box.blockSignals(False)
-            self.video_camera_channel_end_spin_box.blockSignals(False)
         self._markVideoAnnotationDirty()
-        self._configureVideoTrajectoryAnalysis()
+        annotation = self.video_annotation_project.annotation_by_identifier(
+            self.video_annotation_selected_id
+        )
+        if annotation is not None:
+            self._refreshAnnotationTrajectoryChoices(annotation)
         self.plotVideoComparisonImage()
 
     def setVideoCameraVisible(self, visible: bool):
@@ -2494,28 +2543,31 @@ class MainWindow(QMainWindow):
         self.plotVideoComparisonImage()
 
     def applyVideoSync(self):
-        """Apply an explicit time adjustment and reproject video-origin labels."""
+        """Apply the only editable sync value: video start time."""
 
         if not self.video_annotation_project.video_path:
             printError('请先选择摄像头视频')
             return
         start_time = self.video_start_time_edit.dateTime().toPyDateTime()
         previous = self._videoSyncSnapshot()
+        anchors_changed = bool(self.video_annotation_project.calibration_anchors)
         try:
             changed = self.video_annotation_project.sync.update(
                 start_time,
-                self.video_sync_offset_spin_box.value(),
-                self.video_sync_rate_spin_box.value(),
+                0.0,
+                1.0,
             )
         except ValueError as error:
             printError(str(error))
             return
-        if changed:
+        if changed or anchors_changed:
             self._video_sync_undo_stack.append(previous)
             self._video_sync_undo_stack = self._video_sync_undo_stack[-20:]
+        self.video_annotation_project.calibration_anchors = []
+        self.video_sync_calibration_anchors = []
         timeline = self._annotationTimeline()
         moved = self.video_annotation_project.reproject_video_annotations(timeline) if timeline else 0
-        if changed or moved:
+        if changed or anchors_changed or moved:
             self._markVideoAnnotationDirty()
         self._syncVideoProjectWidgets()
         self.refreshVideoAnnotationTable(select_identifier=self.video_annotation_selected_id)
@@ -2525,7 +2577,7 @@ class MainWindow(QMainWindow):
             force=True,
         )
         self.video_sync_summary_label.setText(
-            f'对时已应用：版本 {self.video_annotation_project.sync.revision}，'
+            f'视频开始时间已应用：{format_wall_time(start_time)}；'
             f'重新定位 {moved} 条视频标注。'
         )
 
@@ -2738,7 +2790,7 @@ class MainWindow(QMainWindow):
             if timeline is not None:
                 candidates = trajectory_candidates(
                     self._activeVideoTrajectories(),
-                    self.video_annotation_project.camera_channel_range,
+                    self.video_annotation_project.camera_channel,
                     annotation.start_sample / timeline.sampling_rate,
                     self.annotation_trajectory_tolerance_spin_box.value(),
                 )
@@ -2855,8 +2907,9 @@ class MainWindow(QMainWindow):
                 (item for item in self._activeVideoTrajectories() if item.identifier == selected_trajectory),
                 None,
             )
-            camera_start, camera_end = self.video_annotation_project.camera_channel_range
-            crossing = trajectory_crossing_time(trajectory, (camera_start + camera_end) / 2.0) if trajectory else None
+            crossing = trajectory_crossing_time(
+                trajectory, self.video_annotation_project.camera_channel
+            ) if trajectory else None
             if crossing is not None:
                 timeline = self._annotationTimeline()
                 sampling_rate = timeline.sampling_rate if timeline is not None else self.sampling_rate
@@ -3563,7 +3616,7 @@ class MainWindow(QMainWindow):
         view_box.setLimits(xMin=start_time, xMax=start_time + duration, yMin=0, yMax=channel_count)
         view_box.setRange(xRange=(start_time, start_time + duration), yRange=(0, channel_count), padding=0)
 
-    def drawVehicleTrajectories(self, plot_widget=None):
+    def drawVehicleTrajectories(self, plot_widget=None, full_range: bool = False):
         """Draw stored vehicle paths in an image plot's local coordinates."""
         if self._hide_vehicle_trajectories or not self.vehicle_trajectories:
             return
@@ -3571,10 +3624,16 @@ class MainWindow(QMainWindow):
             return
         plot_widget = plot_widget or self.plot_gray_scale_widget
 
-        start_time = (self.sampling_times_from_num - 1) / self.sampling_rate
-        end_time = self.sampling_times_to_num / self.sampling_rate
-        channel_from = self.channel_from_num
-        channel_to = self.channel_to_num
+        if full_range:
+            start_time = 0.0
+            end_time = self.sampling_times / self.sampling_rate
+            channel_from = 1
+            channel_to = self.channels_num
+        else:
+            start_time = (self.sampling_times_from_num - 1) / self.sampling_rate
+            end_time = self.sampling_times_to_num / self.sampling_rate
+            channel_from = self.channel_from_num
+            channel_to = self.channel_to_num
         colors = ('#e6194B', '#3cb44b', '#4363d8', '#f58231', '#911eb4', '#42d4f4', '#f032e6', '#bfef45')
 
         for trajectory in self.vehicle_trajectories:
@@ -3603,8 +3662,8 @@ class MainWindow(QMainWindow):
             plot_widget.addItem(label)
 
     @staticmethod
-    def _defaultVideoFilterPipeline(channel_count: int, sample_count: int):
-        """Return the non-destructive vehicle-event display preset."""
+    def _defaultEventFilterPipeline(channel_count: int, sample_count: int):
+        """Return the shared full-resolution vehicle-event filter preset."""
 
         selection = (1, max(1, int(channel_count)), 1, max(1, int(sample_count)))
         return [
@@ -3617,13 +3676,13 @@ class MainWindow(QMainWindow):
                     'zero_phase': True,
                 },
                 selection,
-                '带通 0.01–1 Hz',
+                '带通滤波',
             ),
             FilterStep(
                 'common_mode',
                 {'method': 'median'},
                 selection,
-                '中位数共模噪声抑制',
+                '共模噪声去除',
             ),
             FilterStep(
                 'mad_normalize',
@@ -3632,6 +3691,12 @@ class MainWindow(QMainWindow):
                 '各通道 MAD 归一化',
             ),
         ]
+
+    @staticmethod
+    def _defaultVideoFilterPipeline(channel_count: int, sample_count: int):
+        """Compatibility wrapper for the shared default event filter chain."""
+
+        return MainWindow._defaultEventFilterPipeline(channel_count, sample_count)
 
     def _ensureDefaultVideoFilterPipeline(self, channel_count: int, sample_count: int):
         if self._video_filter_customized:
@@ -3645,8 +3710,9 @@ class MainWindow(QMainWindow):
         """Return window display settings and optional trajectory geometry."""
         dx = float(self.video_trajectory_dx_spin_box.value())
         parameters = dict(self._vehicle_tracking_settings or {})
-        camera_start, camera_end = self.video_annotation_project.camera_channel_range
-        detect_trajectories = dx > 0 and camera_end - camera_start + 1 >= 8
+        data_group, _timeline = self._videoDataContext()
+        data_channel_count = int(data_group.channel_count) if data_group is not None else 0
+        detect_trajectories = dx > 0 and data_channel_count >= 8
         display_steps = [
             {
                 'algorithm': step.algorithm,
@@ -3662,14 +3728,9 @@ class MainWindow(QMainWindow):
             self.video_display_mode_combo.currentData()
             if hasattr(self, 'video_display_mode_combo') else 'enhanced'
         )
-        if display_choice == 'raw':
-            display_mode = 'raw'
-        elif self._video_filter_customized:
-            display_mode = 'current'
-        else:
-            display_mode = 'vehicle'
+        display_mode = 'raw' if display_choice == 'raw' else 'current'
         parameters.update({
-            'channel_spacing': dx if dx > 0 else 1.0,
+            'channel_spacing': dx if dx > 0 else 4.0,
             'frequency_low': parameters.get('frequency_low', 0.01),
             'frequency_high': parameters.get('frequency_high', 1.0),
             'target_sampling_rate': parameters.get('target_sampling_rate', 50.0),
@@ -3976,9 +4037,10 @@ class MainWindow(QMainWindow):
         if detection_enabled:
             tracking_note = '轨迹检测已启用'
         else:
-            tracking_note = '填写 dx 且设置至少 8 个摄像头通道后启用轨迹检测'
+            tracking_note = '填写 dx 且 DAS 至少包含 8 个通道后启用轨迹检测'
         self.video_trajectory_status_label.setText(
-            f'显示：{filter_note}；{tracking_note}；按需窗口 {self.video_trajectory_window_seconds:.0f} s。'
+            f'显示：{filter_note}；{tracking_note}；连续滚动窗口 '
+            f'{self._videoVisibleWindowSeconds():.0f} s，后台提前预读。'
         )
         self.plotVideoComparisonImage()
         self._requestVideoTrajectoryForPosition(self._currentVideoPosition())
@@ -3992,10 +4054,8 @@ class MainWindow(QMainWindow):
             or self.video_sequence_data_group is None
         ):
             return None
-        camera_start, camera_end = self.video_annotation_project.camera_channel_range
-        camera_start = max(1, min(data_group.channel_count, camera_start))
-        camera_end = max(1, min(data_group.channel_count, camera_end))
-        camera_start, camera_end = min(camera_start, camera_end), max(camera_start, camera_end)
+        camera_start = 1
+        camera_end = int(data_group.channel_count)
         sample = self.video_annotation_project.sync.sample_for_video_position(position_ms, timeline)
         if sample is None:
             return None
@@ -4016,7 +4076,10 @@ class MainWindow(QMainWindow):
             return
         self._queueVideoTrajectoryWindow(key, priority=0)
         _group, timeline = self._videoDataContext()
-        look_ahead = max(1.0, float(self.video_trajectory_window_seconds or 0.0) * 0.5)
+        look_ahead = max(
+            VIDEO_TRAJECTORY_PREFETCH_SECONDS,
+            self._videoVisibleWindowSeconds() * 0.5,
+        )
         next_position = int(position_ms + look_ahead * 1000)
         if timeline is not None:
             self._queueVideoTrajectoryWindow(
@@ -4060,9 +4123,9 @@ class MainWindow(QMainWindow):
         self.video_trajectory_future = future
         mode_text = self._videoFilterSummary()
         self.video_trajectory_status_label.setText(
-            f'显示：正在生成“{mode_text}”窗口 '
+            f'显示：正在后台预读“{mode_text}”窗口 '
             f'{start / data_group.sampling_rate:.1f}–{end / data_group.sampling_rate:.1f} s；'
-            '完成后自动替换当前图像。'
+            '播放与滚动不会等待到窗口末端再加载。'
         )
         self.video_trajectory_poll_timer.start()
 
@@ -4081,7 +4144,7 @@ class MainWindow(QMainWindow):
                 # Window-local picker IDs must not collide after annotations are saved.
                 trajectory.identifier = int(window.start_sample + index)
             self.video_trajectory_windows[key] = window
-            while len(self.video_trajectory_windows) > 6:
+            while len(self.video_trajectory_windows) > 3:
                 self.video_trajectory_windows.pop(next(iter(self.video_trajectory_windows)))
             self.video_trajectory_current_window = window
             mode_text = self._videoFilterSummary()
@@ -4138,7 +4201,7 @@ class MainWindow(QMainWindow):
         self.video_camera_line = None
         data_group, timeline = self._videoDataContext()
         sequence_active = self.video_sequence_data_group is not None
-        display_data = None if sequence_active else getattr(self, 'data', None)
+        display_data = None if sequence_active else getattr(self, 'origin_data', None)
         plot_widget.setTimeOrigin(timeline.start_time if timeline is not None else None)
         plot_widget.setTitle('')
         if timeline is None or data_group is None or (not sequence_active and display_data is None):
@@ -4156,16 +4219,14 @@ class MainWindow(QMainWindow):
             )
 
         self.video_camera_channel_spin_box.blockSignals(True)
-        self.video_camera_channel_end_spin_box.blockSignals(True)
         try:
             self.video_camera_channel_spin_box.setRange(channel_from, channel_to)
-            self.video_camera_channel_end_spin_box.setRange(channel_from, channel_to)
-            range_start, range_end = self.video_annotation_project.camera_channel_range
-            self.video_camera_channel_spin_box.setValue(min(max(channel_from, range_start), channel_to))
-            self.video_camera_channel_end_spin_box.setValue(min(max(channel_from, range_end), channel_to))
+            camera_channel = self.video_annotation_project.camera_channel
+            self.video_camera_channel_spin_box.setValue(
+                min(max(channel_from, camera_channel), channel_to)
+            )
         finally:
             self.video_camera_channel_spin_box.blockSignals(False)
-            self.video_camera_channel_end_spin_box.blockSignals(False)
 
         item = pg.ImageItem()
         if sequence_active:
@@ -4174,93 +4235,115 @@ class MainWindow(QMainWindow):
             )
             current_sample = 0 if current_sample is None else int(current_sample)
             current_seconds = current_sample / timeline.sampling_rate
-            active_window = self.video_trajectory_current_window
-            if active_window is not None and not (
-                active_window.start_sample <= current_sample <= active_window.end_sample
-            ):
-                active_window = None
-            if active_window is None:
-                candidates = [
-                    window for window in self.video_trajectory_windows.values()
-                    if window.start_sample <= current_sample <= window.end_sample
-                ]
-                if candidates:
-                    active_window = min(
-                        candidates,
-                        key=lambda window: abs(
-                            (window.start_sample + window.end_sample) // 2 - current_sample
-                        ),
-                    )
-                    self.video_trajectory_current_window = active_window
+            candidates = [
+                window for window in self.video_trajectory_windows.values()
+                if window.start_sample <= current_sample <= window.end_sample
+            ]
+            active_window = min(
+                candidates,
+                key=lambda window: abs(
+                    (window.start_sample + window.end_sample) // 2 - current_sample
+                ),
+                default=None,
+            )
+            self.video_trajectory_current_window = active_window
+
+            plot_channel_count = channel_count
+            self._video_plot_channel_from = channel_from
+            duration = timeline.total_samples / timeline.sampling_rate
+            visible_width = min(duration, self._videoVisibleWindowSeconds())
+            visible_width = max(1 / timeline.sampling_rate, visible_width)
+            visible_left = min(
+                max(current_seconds - visible_width * 0.25, 0.0),
+                max(0.0, duration - visible_width),
+            )
+            view_box = plot_widget.getViewBox()
+            view_box.setLimits(
+                xMin=0.0,
+                xMax=duration,
+                yMin=0.0,
+                yMax=plot_channel_count,
+            )
+            view_box.setRange(
+                xRange=(visible_left, visible_left + visible_width),
+                yRange=(0.0, plot_channel_count),
+                padding=0,
+            )
 
             if active_window is not None:
-                plot_channel_count = active_window.channel_to - active_window.channel_from + 1
-                self._video_plot_channel_from = active_window.channel_from
-                item.setImage(active_window.processed_data.T, autoLevels=True)
-                item.setRect(QRectF(
-                    active_window.start_sample / timeline.sampling_rate,
-                    0.0,
-                    active_window.sample_count / timeline.sampling_rate,
-                    plot_channel_count,
-                ))
-                plot_widget.addItem(item)
-                window_start = active_window.start_sample / timeline.sampling_rate
-                window_end = active_window.end_sample / timeline.sampling_rate
-                visible_width = max(
-                    1 / timeline.sampling_rate,
-                    min(self._videoVisibleWindowSeconds(), window_end - window_start),
+                levels = self.imageLevels(active_window.processed_data)
+                cached_windows = sorted(
+                    self.video_trajectory_windows.values(),
+                    key=lambda window: window.start_sample,
                 )
-                visible_left = min(
-                    max(current_seconds - visible_width * 0.25, window_start),
-                    max(window_start, window_end - visible_width),
-                )
-                view_box = plot_widget.getViewBox()
-                view_box.setLimits(
-                    xMin=window_start,
-                    xMax=window_end,
-                    yMin=0.0,
-                    yMax=plot_channel_count,
-                )
-                view_box.setRange(
-                    xRange=(visible_left, visible_left + visible_width),
-                    yRange=(0.0, plot_channel_count),
-                    padding=0,
-                )
+                centers = [
+                    (window.start_sample + window.end_sample) / 2.0
+                    for window in cached_windows
+                ]
+                for index, cached_window in enumerate(cached_windows):
+                    display_start = cached_window.start_sample
+                    display_end = cached_window.end_sample
+                    if index > 0:
+                        display_start = max(
+                            display_start,
+                            int(round((centers[index - 1] + centers[index]) / 2.0)),
+                        )
+                    if index + 1 < len(cached_windows):
+                        display_end = min(
+                            display_end,
+                            int(round((centers[index] + centers[index + 1]) / 2.0)),
+                        )
+                    if display_end <= display_start:
+                        continue
+                    data_width = cached_window.processed_data.shape[1]
+                    sample_scale = data_width / max(1, cached_window.sample_count)
+                    data_start = max(
+                        0,
+                        int(round(
+                            (display_start - cached_window.start_sample) * sample_scale
+                        )),
+                    )
+                    data_end = min(
+                        data_width,
+                        int(round(
+                            (display_end - cached_window.start_sample) * sample_scale
+                        )),
+                    )
+                    if data_end <= data_start:
+                        continue
+                    cached_item = pg.ImageItem()
+                    cached_item.setImage(
+                        cached_window.processed_data[:, data_start:data_end].T,
+                        autoLevels=levels is None,
+                    )
+                    if levels is not None:
+                        cached_item.setLevels(levels)
+                    cached_item.setRect(QRectF(
+                        display_start / timeline.sampling_rate,
+                        0.0,
+                        (display_end - display_start) / timeline.sampling_rate,
+                        plot_channel_count,
+                    ))
+                    plot_widget.addItem(cached_item)
                 self._drawVideoWindowTrajectories(plot_widget, active_window)
             else:
-                range_start, range_end = self.video_annotation_project.camera_channel_range
-                range_start = min(max(channel_from, range_start), channel_to)
-                range_end = min(max(channel_from, range_end), channel_to)
-                range_start, range_end = min(range_start, range_end), max(range_start, range_end)
-                plot_channel_count = range_end - range_start + 1
-                self._video_plot_channel_from = range_start
-                duration = timeline.total_samples / timeline.sampling_rate
-                visible_width = min(duration, self._videoVisibleWindowSeconds())
-                visible_left = min(
-                    max(current_seconds - visible_width * 0.25, 0.0),
-                    max(0.0, duration - visible_width),
-                )
-                view_box = plot_widget.getViewBox()
-                view_box.setLimits(xMin=0.0, xMax=duration, yMin=0.0, yMax=plot_channel_count)
-                view_box.setRange(
-                    xRange=(visible_left, visible_left + visible_width),
-                    yRange=(0.0, plot_channel_count),
-                    padding=0,
-                )
-                waiting = pg.TextItem('正在生成当前 DAS 滤波窗口…', color='#667085', anchor=(0.5, 0.5))
+                waiting = pg.TextItem('正在预读当前 DAS 连续滚动窗口…', color='#667085', anchor=(0.5, 0.5))
                 waiting.setPos(visible_left + visible_width / 2.0, plot_channel_count / 2.0)
                 plot_widget.addItem(waiting)
         else:
             self._video_plot_channel_from = channel_from
-            self.addDataImageItem(
-                plot_widget,
-                item,
-                display_data,
-                use_image_controls=False,
-                show_color_bar=False,
-            )
+            levels = self.imageLevels(display_data)
+            item.setImage(display_data.T, autoLevels=levels is None)
+            if levels is not None:
+                item.setLevels(levels)
+            duration = display_data.shape[1] / timeline.sampling_rate
+            item.setRect(QRectF(0.0, 0.0, duration, channel_count))
+            plot_widget.addItem(item)
+            view_box = plot_widget.getViewBox()
+            view_box.setLimits(xMin=0.0, xMax=duration, yMin=0.0, yMax=channel_count)
+            view_box.setRange(xRange=(0.0, duration), yRange=(0.0, channel_count), padding=0)
             self.drawFileBoundaries(plot_widget, 0, channel_count)
-            self.drawVehicleTrajectories(plot_widget)
+            self.drawVehicleTrajectories(plot_widget, full_range=True)
             self.drawEventRange(plot_widget)
         if self.video_annotation_context_matches:
             self._drawVideoCameraLine()
@@ -4290,8 +4373,7 @@ class MainWindow(QMainWindow):
         pg.InfLineLabel(
             line,
             text=(f'{self.video_annotation_project.camera_name} · 通道 '
-                  f'{self.video_annotation_project.camera_channel_range[0]}–'
-                  f'{self.video_annotation_project.camera_channel_range[1]}'),
+                  f'{self.video_annotation_project.camera_channel}'),
             position=0.97,
             color='#1d4ed8',
             fill=pg.mkBrush(255, 255, 255, 215),
@@ -4390,14 +4472,34 @@ class MainWindow(QMainWindow):
                 self._video_annotation_items.append(marker)
 
     def _drawVideoPlayhead(self):
+        timeline = self._annotationTimeline()
+        can_calibrate = bool(
+            timeline is not None
+            and self.video_annotation_project.sync.video_start_time is not None
+        )
         line = pg.InfiniteLine(
             pos=0.0,
             angle=90,
-            movable=False,
+            movable=can_calibrate,
             pen=pg.mkPen('#7c3aed', width=3, style=Qt.DashLine),
+            hoverPen=pg.mkPen('#5b21b6', width=5, style=Qt.DashLine),
         )
+        if timeline is not None:
+            line.setBounds(
+                (0.0, timeline.total_samples / float(timeline.sampling_rate))
+            )
         line.setZValue(40)
-        line.setToolTip('视频当前播放位置')
+        if can_calibrate:
+            target = self._videoPlayheadTarget(line)
+            if target is not None:
+                sample, wall_time = target
+                self._setVideoPlayheadTooltip(line, sample, wall_time)
+            line.sigDragged.connect(self._videoPlayheadDragged)
+            line.sigPositionChangeFinished.connect(
+                self._videoPlayheadMoveFinished
+            )
+        else:
+            line.setToolTip('请先设置视频开始时间，再拖动紫色虚线进行校正')
         self.video_das_plot_widget.addItem(line)
         self.video_playhead_line = line
         self._video_annotation_items.append(line)
@@ -4556,7 +4658,11 @@ class MainWindow(QMainWindow):
         return None if text == '' else float(text)
 
     def imageLevels(self, data: np.array):
-        finite_data = np.asarray(data)[np.isfinite(data)]
+        flat_data = np.asarray(data).reshape(-1)
+        if flat_data.size > IMAGE_LEVEL_SAMPLE_LIMIT:
+            stride = int(np.ceil(flat_data.size / IMAGE_LEVEL_SAMPLE_LIMIT))
+            flat_data = flat_data[::stride]
+        finite_data = flat_data[np.isfinite(flat_data)]
         if finite_data.size == 0:
             return None
 
@@ -4806,11 +4912,8 @@ class MainWindow(QMainWindow):
             self._ensureDefaultVideoFilterPipeline(
                 int(channels_num), int(data_group.total_samples)
             )
-            current_range = self.video_annotation_project.camera_channel_range
-            if current_range == (1, 1) and channels_num > 1:
-                self.video_annotation_project.set_camera_channel_range(
-                    1, min(int(channels_num), 100)
-                )
+            if self.video_annotation_project.camera_channel > channels_num:
+                self.video_annotation_project.set_camera_channel(int(channels_num))
             self.updateVideoAnnotationDataContext()
             self._syncVideoProjectWidgets()
             self._refreshVideoDasRecommendation()
@@ -6018,6 +6121,12 @@ class MainWindow(QMainWindow):
             lambda: self.sidebar_tabs.setCurrentWidget(self.data_sidebar_widget)
         )
         dialog.set_saved_pipelines(self._filter_pipeline_history)
+        if not self._das_filter_steps:
+            dialog.set_draft_pipeline(
+                self._defaultEventFilterPipeline(*self.raw_data.shape),
+                '已载入默认车辆事件增强滤波链',
+                new_identifiers=False,
+            )
         dialog.show()
         self.sidebar_tabs.setCurrentWidget(self.filter_sidebar_widget)
 
@@ -6073,6 +6182,7 @@ class MainWindow(QMainWindow):
             previous_steps=self._last_das_filter_steps,
         )
         self.das_filter_dialog.setAutoReapply(self.auto_reapply_filter_pipeline)
+        replay_started = False
         if self.auto_reapply_filter_pipeline and self._last_das_filter_steps and not self._das_filter_steps:
             try:
                 steps = self.adaptPreviousFilterSteps()
@@ -6080,12 +6190,19 @@ class MainWindow(QMainWindow):
                 self.das_filter_dialog.status_label.setText(f'未自动应用最近一次成功滤波链：{error}')
                 self.statusBar().showMessage(f'未自动应用最近一次成功滤波链：{error}', 12000)
             else:
-                if self.das_filter_dialog.replayExternalPipeline(
+                replay_started = self.das_filter_dialog.replayExternalPipeline(
                     steps,
                     '切换文件后自动应用最近一次成功滤波链',
                     commit_after=True,
-                ):
+                )
+                if replay_started:
                     self.statusBar().showMessage('正在从新文件原始数据自动应用最近一次成功滤波链……')
+        if not replay_started and not self._das_filter_steps:
+            self.das_filter_dialog.set_draft_pipeline(
+                self._defaultEventFilterPipeline(*self.raw_data.shape),
+                '已载入默认车辆事件增强滤波链',
+                new_identifiers=False,
+            )
 
     def setDASFilterPipeline(self, steps):
         self._das_filter_steps = clone_steps(steps)

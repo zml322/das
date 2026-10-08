@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from fractions import Fraction
 from typing import Dict, List, Tuple
 
 import numpy as np
@@ -87,26 +86,6 @@ def read_group_window(
     return result
 
 
-def _resample_for_display(
-    data: np.ndarray, sampling_rate: float, target_rate: float
-) -> tuple[np.ndarray, float]:
-    """Bound a display window before expensive filtering and plotting."""
-
-    target = min(float(sampling_rate), max(2.5, float(target_rate)))
-    if sampling_rate <= target * 1.05:
-        return np.asarray(data, dtype=np.float32), float(sampling_rate)
-    fraction = Fraction(target / float(sampling_rate)).limit_denominator(2000)
-    reduced = signal.resample_poly(
-        np.asarray(data, dtype=np.float32),
-        fraction.numerator,
-        fraction.denominator,
-        axis=1,
-    )
-    return np.asarray(reduced, dtype=np.float32), (
-        float(sampling_rate) * fraction.numerator / fraction.denominator
-    )
-
-
 def _process_display_data(
     data: np.ndarray,
     sampling_rate: float,
@@ -116,15 +95,20 @@ def _process_display_data(
 
     mode = str(parameters.get("display_mode", "vehicle"))
     if mode == "raw":
-        reduced, rate = _resample_for_display(data, sampling_rate, 150.0)
-        return np.asarray(signal.detrend(reduced, axis=1), dtype=np.float32), rate
+        full_resolution = np.asarray(data, dtype=np.float32)
+        return (
+            np.asarray(signal.detrend(full_resolution, axis=1), dtype=np.float32),
+            float(sampling_rate),
+        )
 
     if mode == "current":
         working = np.asarray(data, dtype=np.float32)
         steps = tuple(parameters.get("display_filter_steps", ()))
         if not any(bool(step.get("enabled", True)) for step in steps):
-            reduced, rate = _resample_for_display(working, sampling_rate, 150.0)
-            return np.asarray(signal.detrend(reduced, axis=1), dtype=np.float32), rate
+            return (
+                np.asarray(signal.detrend(working, axis=1), dtype=np.float32),
+                float(sampling_rate),
+            )
         working = working.copy()
         window_channel_from = int(parameters.get("window_channel_from", 1))
         window_channel_to = window_channel_from + working.shape[0] - 1
@@ -152,44 +136,40 @@ def _process_display_data(
             if filtered.shape != source.shape:
                 raise ValueError("视频显示滤波改变了窗口形状")
             working[local_from:local_to] = filtered
-        return _resample_for_display(working, sampling_rate, 150.0)
+        return working, float(sampling_rate)
 
     if mode == "vibration":
         nyquist = float(sampling_rate) / 2.0
         high = min(50.0, nyquist * 0.9)
         low = min(5.0, high * 0.5)
-        target = min(float(sampling_rate), max(2.5 * high, 50.0))
-        reduced, rate = _resample_for_display(data, sampling_rate, target)
         filtered = apply_das_filter(
-            reduced,
-            rate,
+            np.asarray(data, dtype=np.float32),
+            float(sampling_rate),
             "bandpass",
             {
                 "frequency_low": low,
-                "frequency_high": min(high, rate / 2.0 * 0.9),
+                "frequency_high": min(high, float(sampling_rate) / 2.0 * 0.9),
                 "order": 4,
                 "zero_phase": True,
             },
         )
-        return apply_das_filter(filtered, rate, "mad_normalize", {}), rate
+        return (
+            apply_das_filter(filtered, float(sampling_rate), "mad_normalize", {}),
+            float(sampling_rate),
+        )
 
-    # Vehicle response mode is deliberately cheap enough to follow playback:
-    # anti-alias/downsample first, then expose the low-frequency response with
-    # the same robust per-channel normalization used by the picker.
+    # Preserve every acquired sample in the displayed vehicle-response image.
+    # Trajectory detection has its own internal resampling path and must not
+    # reduce the resolution of the user-facing DAS data.
     low = float(parameters.get("frequency_low", 0.01))
     high = float(parameters.get("frequency_high", 1.0))
-    target = min(
-        float(sampling_rate),
-        max(float(parameters.get("target_sampling_rate", 50.0)), 2.5 * high),
-    )
-    reduced, rate = _resample_for_display(data, sampling_rate, target)
     filtered = apply_das_filter(
-        reduced,
-        rate,
+        np.asarray(data, dtype=np.float32),
+        float(sampling_rate),
         "bandpass",
         {
             "frequency_low": low,
-            "frequency_high": min(high, rate / 2.0 * 0.9),
+            "frequency_high": min(high, float(sampling_rate) / 2.0 * 0.9),
             "order": 4,
             "zero_phase": True,
         },
@@ -197,11 +177,14 @@ def _process_display_data(
     if filtered.shape[0] >= 2:
         filtered = apply_das_filter(
             filtered,
-            rate,
+            float(sampling_rate),
             "common_mode",
             {"method": str(parameters.get("common_mode_method", "median"))},
         )
-    return apply_das_filter(filtered, rate, "mad_normalize", {}), rate
+    return (
+        apply_das_filter(filtered, float(sampling_rate), "mad_normalize", {}),
+        float(sampling_rate),
+    )
 
 
 def analyze_group_window(

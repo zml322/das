@@ -6,7 +6,7 @@ import os
 import sys
 import tempfile
 import unittest
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
@@ -239,11 +239,36 @@ class FilterPipelineChecks(unittest.TestCase):
         self.assertEqual(dialog.add_step_button.text(), "加入滤波链")
         self.assertEqual(dialog.apply_button.text(), "应用滤波")
         self.assertEqual(dialog.reset_button.text(), "恢复原始数据")
+        self.assertEqual(dialog.channel_spacing.value(), 4.0)
         self.assertFalse(hasattr(dialog, "accept_button"))
         self.assertFalse(hasattr(dialog, "cancel_button"))
         self.assertFalse(hasattr(dialog, "close_button"))
         self.assertFalse(hasattr(dialog, "reuse_steps_button"))
         self.assertEqual(dialog.history_list.horizontalScrollBar().maximum(), 0)
+        default_steps = dialog.pipeline_steps()
+        self.assertEqual(
+            [step.algorithm for step in default_steps],
+            ["bandpass", "common_mode", "mad_normalize"],
+        )
+        self.assertEqual(
+            [step.selection for step in default_steps],
+            [(1, 4, 1, 200)] * 3,
+        )
+        self.assertEqual(default_steps[0].parameters, {
+            "frequency_low": 0.01,
+            "frequency_high": 1.0,
+            "order": 4,
+            "zero_phase": True,
+        })
+        self.assertEqual(default_steps[1].parameters, {"method": "median"})
+        self.assertEqual(
+            [step.processing_mode for step in default_steps],
+            ["continuous"] * 3,
+        )
+        self.assertTrue(dialog._draft_dirty)
+        self.assertTrue(dialog.apply_button.isEnabled())
+        self.assertEqual(window._das_filter_steps, [])
+        np.testing.assert_array_equal(window.origin_data, raw)
         self.assertEqual(window.overview_form.verticalSpacing(), 1)
         self.assertEqual(window.gps_from_line_edit.maximumHeight(), 22)
         self.assertEqual(window.gps_from_line_edit.objectName(), "metadataValue")
@@ -605,8 +630,19 @@ class FilterPipelineChecks(unittest.TestCase):
         window.plot_gray_scale_widget.setTimeOrigin(window.data_timeline.start_time)
         self.assertEqual(
             window.plot_gray_scale_widget.time_axis.tickStrings([0, 30.72], 1, 10),
-            ["16:54:00.280", "16:54:31.000"],
+            ["16:54:00", "16:54:31"],
         )
+        major_spacing, major_values = window.plot_gray_scale_widget.time_axis.tickValues(
+            0, 60, 1200
+        )[0]
+        self.assertEqual(major_spacing, 10.0)
+        major_times = [
+            window.data_timeline.start_time + timedelta(seconds=value)
+            for value in major_values
+        ]
+        self.assertTrue(major_times)
+        self.assertTrue(all(value.microsecond == 0 for value in major_times))
+        self.assertTrue(all(value.second % 10 == 0 for value in major_times))
         highlighted = {
             window.files_table_widget.item(row, 0).text()
             for row in range(window.files_table_widget.rowCount())
