@@ -6,6 +6,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 
@@ -24,7 +25,12 @@ from utils.classes.video_media import (
     probe_video,
 )
 from utils.classes.vehicle_tracking import VehicleTrajectory
-from utils.classes.video_trajectory import analyze_group_window, read_group_window, required_window_seconds
+from utils.classes.video_trajectory import (
+    _process_display_data,
+    analyze_group_window,
+    read_group_window,
+    required_window_seconds,
+)
 
 
 def _pts(value: int) -> bytes:
@@ -100,6 +106,62 @@ class VideoPipelineChecks(unittest.TestCase):
             actual = read_group_window(group, 5, 12, 2, 3)
             expected = np.concatenate((first[1:3, 5:8], second[1:3, :4]), axis=1)
             self.assertTrue(np.array_equal(actual, expected))
+
+    def test_video_display_pipeline_stacks_steps_on_global_channel_selection(self):
+        raw = np.vstack([
+            np.linspace(0, 1, 100),
+            np.linspace(1, 2, 100),
+            np.linspace(2, 3, 100),
+        ]).astype(np.float32)
+        processed, rate = _process_display_data(raw, 10.0, {
+            "display_mode": "current",
+            "window_channel_from": 10,
+            "display_filter_steps": [
+                {
+                    "algorithm": "common_mode",
+                    "parameters": {"method": "median"},
+                    "selection": (11, 11, 1, 100),
+                    "enabled": True,
+                },
+                {
+                    "algorithm": "mad_normalize",
+                    "parameters": {},
+                    "selection": (11, 11, 1, 100),
+                    "enabled": True,
+                },
+            ],
+        })
+        self.assertEqual(rate, 10.0)
+        self.assertTrue(np.array_equal(processed[0], raw[0]))
+        self.assertTrue(np.array_equal(processed[2], raw[2]))
+        self.assertTrue(np.allclose(processed[1], 0.0))
+
+    def test_vehicle_display_preset_runs_bandpass_common_mode_and_mad(self):
+        raw = np.vstack([
+            np.sin(np.linspace(0, 20, 400) + phase)
+            for phase in (0.0, 0.2, 0.4)
+        ]).astype(np.float32)
+        algorithms = []
+
+        def passthrough(data, _rate, algorithm, _parameters):
+            algorithms.append(algorithm)
+            return np.asarray(data, dtype=np.float32)
+
+        with patch(
+            "utils.classes.video_trajectory.apply_das_filter",
+            side_effect=passthrough,
+        ):
+            processed, rate = _process_display_data(raw, 10.0, {
+                "display_mode": "vehicle",
+                "frequency_low": 0.01,
+                "frequency_high": 1.0,
+                "target_sampling_rate": 10.0,
+                "common_mode_method": "median",
+            })
+
+        self.assertEqual(algorithms, ["bandpass", "common_mode", "mad_normalize"])
+        self.assertEqual(processed.shape, raw.shape)
+        self.assertEqual(rate, 10.0)
 
     def test_low_frequency_window_rule_and_range_candidate_metadata(self):
         self.assertEqual(required_window_seconds({"frequency_low": 0.01}, 120), 200.0)

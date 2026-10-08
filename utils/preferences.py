@@ -13,6 +13,7 @@ class AppPreferences:
     TIME_CORRECTION_KEY = "timeline/device_behind_seconds"
     AUTO_FILTER_KEY = "filter/auto_reapply_pipeline"
     FILTER_HISTORY_KEY = "filter/pipeline_history_v1"
+    SIDEBAR_WIDTH_KEY = "workspace/sidebar_width"
 
     def __init__(self, settings: Optional[QSettings] = None):
         self.settings = settings or QSettings("DASViewer", "DASViewer")
@@ -53,4 +54,20 @@ class AppPreferences:
     def set_filter_pipeline_history(self, entries) -> None:
         payload = json.dumps(list(entries), ensure_ascii=False, separators=(",", ":"))
         self.settings.setValue(self.FILTER_HISTORY_KEY, payload)
+        self.settings.sync()
+
+    def sidebar_width(self) -> int:
+        """Return the last user-selected workspace sidebar width."""
+
+        value = self.settings.value(self.SIDEBAR_WIDTH_KEY, 460)
+        try:
+            return min(max(int(value), 380), 900)
+        except (TypeError, ValueError):
+            return 460
+
+    def set_sidebar_width(self, value: int) -> None:
+        self.settings.setValue(
+            self.SIDEBAR_WIDTH_KEY,
+            min(max(int(value), 380), 900),
+        )
         self.settings.sync()

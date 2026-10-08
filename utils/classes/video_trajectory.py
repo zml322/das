@@ -9,7 +9,7 @@ from typing import Dict, List, Tuple
 import numpy as np
 from scipy import signal
 
-from .data_group import DataGroup
+from .data_group import DataGroup, ensure_memory_budget
 from .das_filter import apply_das_filter
 from .vehicle_tracking import (
     VehicleTrajectory,
@@ -121,15 +121,37 @@ def _process_display_data(
 
     if mode == "current":
         working = np.asarray(data, dtype=np.float32)
-        for step in parameters.get("display_filter_steps", ()):
+        steps = tuple(parameters.get("display_filter_steps", ()))
+        if not any(bool(step.get("enabled", True)) for step in steps):
+            reduced, rate = _resample_for_display(working, sampling_rate, 150.0)
+            return np.asarray(signal.detrend(reduced, axis=1), dtype=np.float32), rate
+        working = working.copy()
+        window_channel_from = int(parameters.get("window_channel_from", 1))
+        window_channel_to = window_channel_from + working.shape[0] - 1
+        for step in steps:
             if not bool(step.get("enabled", True)):
                 continue
-            working = apply_das_filter(
-                working,
+            selection = tuple(step.get("selection", (window_channel_from, window_channel_to, 1, working.shape[1])))
+            if len(selection) != 4:
+                raise ValueError("视频显示滤波步骤范围无效")
+            selected_from, selected_to = sorted((int(selection[0]), int(selection[1])))
+            selected_from = max(window_channel_from, selected_from)
+            selected_to = min(window_channel_to, selected_to)
+            if selected_from > selected_to:
+                continue
+            local_from = selected_from - window_channel_from
+            local_to = selected_to - window_channel_from + 1
+            source = working[local_from:local_to]
+            filtered = apply_das_filter(
+                source,
                 float(sampling_rate),
                 str(step["algorithm"]),
                 dict(step.get("parameters", {})),
             )
+            filtered = np.asarray(filtered, dtype=np.float32)
+            if filtered.shape != source.shape:
+                raise ValueError("视频显示滤波改变了窗口形状")
+            working[local_from:local_to] = filtered
         return _resample_for_display(working, sampling_rate, 150.0)
 
     if mode == "vibration":
@@ -172,6 +194,13 @@ def _process_display_data(
             "zero_phase": True,
         },
     )
+    if filtered.shape[0] >= 2:
+        filtered = apply_das_filter(
+            filtered,
+            rate,
+            "common_mode",
+            {"method": str(parameters.get("common_mode_method", "median"))},
+        )
     return apply_das_filter(filtered, rate, "mad_normalize", {}), rate
 
 
@@ -185,6 +214,12 @@ def analyze_group_window(
 ) -> VideoTrajectoryWindow:
     """Run the established picker on a suitable long read-only window."""
 
+    ensure_memory_budget(
+        channel_to - channel_from + 1,
+        end_sample - start_sample,
+        4.0,
+        "视频 DAS 窗口处理",
+    )
     data = read_group_window(data_group, start_sample, end_sample, channel_from, channel_to)
     processed_data, processed_rate = _process_display_data(
         data, data_group.sampling_rate, parameters

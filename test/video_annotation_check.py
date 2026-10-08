@@ -22,6 +22,7 @@ from PyQt5.QtWidgets import QApplication
 
 from utils.classes.data_group import DataGroup
 from utils.classes.data_timeline import DataTimeline
+from utils.classes.filter_pipeline import FilterStep
 from utils.classes.vehicle_tracking import VehicleTrajectory
 from utils.classes.video_annotation import (
     AnnotationProject,
@@ -173,16 +174,24 @@ class VideoAnnotationChecks(unittest.TestCase):
         window.plotVideoComparisonImage()
         self.assertEqual(window.tab_widget.count(), 4)
         self.assertEqual(window.sidebar_tabs.count(), 3)
+        window.tab_widget.setCurrentWidget(window.video_compare_container)
+        self.assertIs(window.sidebar_tabs.currentWidget(), window.annotation_sidebar_widget)
+        self.assertTrue(window.annotation_sidebar_widget.isAncestorOf(window.video_viewport))
+        self.assertFalse(window.video_compare_container.isAncestorOf(window.video_viewport))
         self.assertIsNotNone(window.video_camera_line)
         window._alignCurrentVideoToDasSample(100)
         self.assertAlmostEqual(window.video_annotation_project.sync.manual_offset_seconds, 0.1)
+        self.assertTrue(window.video_sync_undo_button.isEnabled())
+        window.undoVideoSyncCalibration()
+        self.assertAlmostEqual(window.video_annotation_project.sync.manual_offset_seconds, 0.0)
+        window._alignCurrentVideoToDasSample(100)
         window.addVideoPointAnnotation()
         self.assertEqual(len(window.video_annotation_project.annotations), 1)
         self.assertEqual(window.video_annotation_project.annotations[0].start_sample, 100)
         self.assertIsNotNone(window.video_playhead_line)
         window.deleteLater()
 
-    def test_single_start_file_builds_decimated_video_sequence(self):
+    def test_single_start_file_builds_metadata_only_video_sequence(self):
         with tempfile.TemporaryDirectory(prefix="das-video-sequence-") as directory:
             root = Path(directory)
             for second in (10, 11, 12):
@@ -199,11 +208,49 @@ class VideoAnnotationChecks(unittest.TestCase):
             window.loadVideoSequenceFromStartRow(0)
 
             self.assertEqual(len(window.video_sequence_data_group.segments), 3)
-            self.assertEqual(window.video_sequence_display_data.shape, (4, 60))
-            self.assertEqual(window.video_sequence_display_stride, 1)
+            self.assertFalse(hasattr(window, "video_sequence_display_data"))
             self.assertIs(window._annotationTimeline(), window.video_sequence_timeline)
-            self.assertIn("连续 DAS：3 文件", window.video_sequence_status_label.text())
+            self.assertIn("匹配 DAS：3 文件", window.video_sequence_status_label.text())
+            self.assertIn("按窗口读取", window.video_sequence_status_label.text())
             self.assertIs(window.tab_widget.currentWidget(), window.video_compare_container)
+            self.assertEqual(
+                [step.algorithm for step in window._video_filter_steps],
+                ["bandpass", "common_mode", "mad_normalize"],
+            )
+            self.assertEqual(window.video_filter_summary_label.text(), "车辆事件增强")
+            window.showVideoFilterDialog()
+            self.assertIsNotNone(window.video_filter_dialog)
+            self.assertEqual(window.video_filter_dialog.windowTitle(), "视频对照 · 二维显示滤波")
+            window.setVideoFilterPipeline([
+                FilterStep(
+                    "mad_normalize", {}, (1, 4, 1, 60), "各通道 MAD 归一化"
+                )
+            ])
+            self.assertEqual(window.video_filter_summary_label.text(), "1 步滤波")
+            window.video_filter_dialog.close()
+            window.deleteLater()
+
+    def test_video_time_matching_reads_headers_and_excludes_unrelated_files(self):
+        with tempfile.TemporaryDirectory(prefix="das-video-match-") as directory:
+            root = Path(directory)
+            for second in (5, 10, 20):
+                header = np.zeros(20, dtype="<f4")
+                header[:6] = [2026, 9, 5, 5, 50, second]
+                header[7:10] = [20, 4, 10]
+                data = np.zeros((4, 20), dtype="<f4")
+                target = root / f"ch1_2026-09-05-05-50-{second:02d}_2_20_4_10.bin"
+                np.concatenate((header, data.ravel())).astype("<f4").tofile(target)
+
+            window = MainWindow()
+            window.time_correction_seconds = 0.0
+            window.video_annotation_project.sync.update(
+                datetime(2026, 9, 5, 5, 50, 8), 0.0, 1.0
+            )
+            window.video_position_slider.setRange(0, 4_000)
+            matches = window._matchingVideoDasPaths(str(root), margin_seconds=0.0)
+
+            self.assertEqual(len(matches), 1)
+            self.assertIn("05-50-10", os.path.basename(matches[0]))
             window.deleteLater()
 
 
