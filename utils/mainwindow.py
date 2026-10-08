@@ -270,6 +270,7 @@ class MainWindow(QMainWindow):
         self.video_sequence_data_group = None
         self.video_sequence_timeline = None
         self.video_sequence_source_paths = []
+        self.video_sequence_time_headers = []
         self.video_sequence_selected_segment_index = None
         self.video_das_match_required = False
 
@@ -1110,7 +1111,8 @@ class MainWindow(QMainWindow):
         self.video_position_slider.setRange(0, 0)
         self.video_position_slider.setAccessibleName('视频播放位置')
         self.video_time_label = Label('--:--:--.--- / --:--:--.---')
-        self.video_time_label.setFixedWidth(190)
+        self.video_time_label.setMinimumWidth(330)
+        self.video_time_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         transport_actions = QHBoxLayout()
         transport_actions.setContentsMargins(0, 0, 0, 0)
         transport_actions.setSpacing(5)
@@ -1506,6 +1508,7 @@ class MainWindow(QMainWindow):
         self.video_sequence_data_group = None
         self.video_sequence_timeline = None
         self.video_sequence_source_paths = []
+        self.video_sequence_time_headers = []
         self.video_sequence_selected_segment_index = None
         self.video_das_match_required = bool(self.video_annotation_project.video_path)
         self.video_trajectory_windows.clear()
@@ -1629,6 +1632,9 @@ class MainWindow(QMainWindow):
             self.video_start_time_edit.blockSignals(False)
             self.video_sync_offset_spin_box.blockSignals(False)
             self.video_sync_rate_spin_box.blockSignals(False)
+        self._updateVideoTimeLabel(
+            self._currentVideoPosition(), self.video_position_slider.maximum()
+        )
         self._updateVideoProjectLabel()
         self._updateVideoControlEnabledState()
         self._updateVideoSyncState()
@@ -1944,9 +1950,7 @@ class MainWindow(QMainWindow):
         self.video_ffmpeg_position_ms = 0
         self.video_position_slider.setRange(0, self.video_ffmpeg_duration_ms)
         self.video_position_slider.setValue(0)
-        self.video_time_label.setText(
-            f'{format_video_position(0)} / {format_video_position(self.video_ffmpeg_duration_ms)}'
-        )
+        self._updateVideoTimeLabel(0, self.video_ffmpeg_duration_ms)
         self.video_viewport_stack.setCurrentWidget(self.video_frame_surface)
         self.video_frame_surface.setText('播放缓存已就绪；点击播放。')
         self._seekFfmpegVideo(0, play_continuously=False)
@@ -1990,9 +1994,8 @@ class MainWindow(QMainWindow):
             self._renderVideoFrame()
         if not self._video_slider_dragging:
             self.video_position_slider.setValue(self.video_ffmpeg_position_ms)
-        self.video_time_label.setText(
-            f'{format_video_position(self.video_ffmpeg_position_ms)} / '
-            f'{format_video_position(self.video_ffmpeg_duration_ms)}'
+        self._updateVideoTimeLabel(
+            self.video_ffmpeg_position_ms, self.video_ffmpeg_duration_ms
         )
         self._updateVideoPlayhead(self.video_ffmpeg_position_ms)
 
@@ -2071,9 +2074,7 @@ class MainWindow(QMainWindow):
         self._video_slider_dragging = True
 
     def _videoSliderMoved(self, value: int):
-        self.video_time_label.setText(
-            f'{format_video_position(value)} / {format_video_position(self.video_position_slider.maximum())}'
-        )
+        self._updateVideoTimeLabel(value, self.video_position_slider.maximum())
         self._updateVideoPlayhead(value, force=True)
 
     def _videoSliderReleased(self):
@@ -2090,9 +2091,9 @@ class MainWindow(QMainWindow):
         if duration <= 0 and self.video_media_probe is not None and self.video_media_probe.duration_seconds:
             duration = int(round(self.video_media_probe.duration_seconds * 1000.0))
         self.video_position_slider.setRange(0, max(0, int(duration)))
-        self.video_time_label.setText(
-            f'{format_video_position(self.video_player.position() if self.video_player else 0)} / '
-            f'{format_video_position(duration)}'
+        self._updateVideoTimeLabel(
+            self.video_player.position() if self.video_player else 0,
+            duration,
         )
 
     def _videoStateChanged(self, state):
@@ -2118,12 +2119,41 @@ class MainWindow(QMainWindow):
             if details:
                 self.video_sync_summary_label.setText(f'视频播放失败：{details}')
 
+    def _videoFrameTime(self, position_ms: int):
+        """Return the camera-clock time for one playback position."""
+
+        start_time = self.video_annotation_project.sync.video_start_time
+        if start_time is None:
+            return None
+        return start_time + timedelta(seconds=max(0, int(position_ms)) / 1000.0)
+
+    def _updateVideoTimeLabel(self, position_ms: int, duration_ms: int = None):
+        """Show camera wall time prominently while retaining playback progress."""
+
+        position_ms = max(0, int(position_ms))
+        if duration_ms is None:
+            duration_ms = self.video_position_slider.maximum()
+        duration_ms = max(0, int(duration_ms))
+        progress = (
+            f'{format_video_position(position_ms)} / '
+            f'{format_video_position(duration_ms)}'
+        )
+        frame_time = self._videoFrameTime(position_ms)
+        if frame_time is None:
+            self.video_time_label.setText(progress)
+            self.video_time_label.setToolTip('请先设置视频开始时间')
+            return
+        wall_time = format_wall_time(frame_time)
+        self.video_time_label.setText(f'摄像头 {wall_time}\n进度 {progress}')
+        self.video_time_label.setToolTip(
+            f'当前视频帧的摄像头时间：{wall_time}\n视频开始时间：'
+            f'{format_wall_time(self.video_annotation_project.sync.video_start_time)}'
+        )
+
     def _videoPositionChanged(self, position: int):
         if not self._video_slider_dragging:
             self.video_position_slider.setValue(max(0, int(position)))
-        self.video_time_label.setText(
-            f'{format_video_position(position)} / {format_video_position(self.video_position_slider.maximum())}'
-        )
+        self._updateVideoTimeLabel(position, self.video_position_slider.maximum())
         self._updateVideoPlayhead(position)
 
     def _updateVideoPlayhead(self, position_ms: int, force: bool = False):
@@ -2210,9 +2240,14 @@ class MainWindow(QMainWindow):
         self.video_current_das_label.setText(
             f'DAS {format_wall_time(wall_time)}  |  样点 {sample}'
         )
-        self.video_sync_summary_label.setText(
-            f'拖动对时：松开后，当前视频帧将对应 DAS {format_wall_time(wall_time)}。'
-        )
+        camera_time = self._videoFrameTime(self._currentVideoPosition())
+        if camera_time is not None:
+            delta = (camera_time - wall_time).total_seconds()
+            self.video_sync_summary_label.setText(
+                f'拖动对时：摄像头 {format_wall_time(camera_time)}；'
+                f'所选 DAS {format_wall_time(wall_time)}；松开后修正 DAS '
+                f'{delta:+.3f} s。'
+            )
 
     def _videoPlayheadMoveFinished(self, line):
         """Commit one drag as a single-start-time video/DAS calibration."""
@@ -2407,7 +2442,7 @@ class MainWindow(QMainWindow):
         self._updateVideoPlayhead(position, force=True)
 
     def _alignCurrentVideoToDasSample(self, sample: int):
-        """Derive the sole video start time from one video-frame/DAS match."""
+        """Use the camera clock to correct the DAS wall-clock timeline."""
 
         timeline = self._annotationTimeline()
         sync = self.video_annotation_project.sync
@@ -2419,22 +2454,32 @@ class MainWindow(QMainWindow):
         elif self.video_player is not None:
             self.video_player.pause()
         position_ms = self._currentVideoPosition()
-        target_time = timeline.absolute_time_for_sample(sample)
-        start_time = target_time - timedelta(seconds=position_ms / 1000.0)
-        self._pushVideoSyncUndo()
-        sync.update(start_time, 0.0, 1.0)
+        camera_time = self._videoFrameTime(position_ms)
+        if camera_time is None:
+            printError('无法计算当前视频帧的摄像头时间')
+            return
+        das_time_before = timeline.absolute_time_for_sample(sample)
+        correction_delta = (camera_time - das_time_before).total_seconds()
+        new_correction = self.time_correction_seconds + correction_delta
+        annotation_positions = {
+            annotation.identifier: (annotation.start_sample, annotation.end_sample)
+            for annotation in self.video_annotation_project.annotations
+        }
         self.video_annotation_project.calibration_anchors = []
         self.video_sync_calibration_anchors = []
-        moved = self.video_annotation_project.reproject_video_annotations(timeline)
+        self.setTimeCorrectionSeconds(new_correction)
+        moved = sum(
+            annotation_positions.get(annotation.identifier)
+            != (annotation.start_sample, annotation.end_sample)
+            for annotation in self.video_annotation_project.annotations
+        )
         self._markVideoAnnotationDirty()
-        self._syncVideoProjectWidgets()
         self.refreshVideoAnnotationTable(select_identifier=self.video_annotation_selected_id)
-        self.plotVideoComparisonImage()
         self._updateVideoPlayhead(position_ms, force=True)
         self.video_sync_summary_label.setText(
-            f'拖动对时已应用：视频 {format_video_position(position_ms)} '
-            f'→ DAS {format_wall_time(target_time)}；视频开始时间已更新为 '
-            f'{format_wall_time(start_time)}，重新定位 {moved} 条标签。'
+            f'摄像头基准对时已应用：当前帧 {format_wall_time(camera_time)}；'
+            f'DAS 时间轴修正 {correction_delta:+.3f} s，累计 '
+            f'{new_correction:+.3f} s；重新定位 {moved} 条标签。'
         )
 
     def _recordVideoCalibrationAnchor(self, sample: int):
@@ -4907,6 +4952,7 @@ class MainWindow(QMainWindow):
             self.video_sequence_data_group = data_group
             self.video_sequence_timeline = timeline
             self.video_sequence_source_paths = list(paths)
+            self.video_sequence_time_headers = list(headers)
             self.video_sequence_selected_segment_index = 0
             self.video_das_match_required = False
             self._ensureDefaultVideoFilterPipeline(
@@ -5149,6 +5195,20 @@ class MainWindow(QMainWindow):
             f'{format_wall_time(self.data_timeline.end_time)}'
         )
         self.acquisition_params['时间连续性警告'] = str(len(self.data_timeline.discontinuities))
+
+    def rebuildVideoSequenceTimeline(self):
+        """Apply the same DAS clock correction to a metadata-only video sequence."""
+
+        if (
+            self.video_sequence_data_group is None
+            or not self.video_sequence_time_headers
+        ):
+            return
+        self.video_sequence_timeline = DataTimeline.from_data_group(
+            self.video_sequence_data_group,
+            self.video_sequence_time_headers,
+            correction_seconds=self.time_correction_seconds,
+        )
 
     def updateImages(self):
         """
@@ -5488,12 +5548,15 @@ class MainWindow(QMainWindow):
         self.time_correction_seconds = float(correction_seconds)
         self.preferences.set_time_correction_seconds(self.time_correction_seconds)
         self.rebuildDataTimeline()
+        self.rebuildVideoSequenceTimeline()
         self.updateDataGPSTime()
         self.updateStitchedFilesList()
         self.updateVideoAnnotationDataContext()
         self.refreshVideoAnnotationTable(select_identifier=self.video_annotation_selected_id)
         if hasattr(self, 'data'):
             self.updateImages()
+        elif hasattr(self, 'video_das_plot_widget'):
+            self.plotVideoComparisonImage()
         self.statusBar().showMessage(
             f'时间修正已保存：记录时间 {self.time_correction_seconds:+.3f} s。',
             8000,

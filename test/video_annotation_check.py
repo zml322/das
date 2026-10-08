@@ -6,9 +6,10 @@ import csv
 import os
 import tempfile
 import unittest
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 import sys
+from unittest.mock import patch
 
 import numpy as np
 import pyqtgraph as pg
@@ -163,6 +164,7 @@ class VideoAnnotationChecks(unittest.TestCase):
             ["camera_case_2026-09-05-23-41-42.bin"], [200], 4, 1000
         )
         window._source_time_headers = [[2026, 9, 5, 23, 41, 42]]
+        window.time_correction_seconds = 0.0
         window.rebuildDataTimeline()
         window.initLocalParams()
         window.updateDataRange()
@@ -204,17 +206,22 @@ class VideoAnnotationChecks(unittest.TestCase):
             format_wall_time(window.data_timeline.absolute_time_for_sample(100)),
             playhead.toolTip(),
         )
-        window._videoPlayheadMoveFinished(playhead)
-        self.assertEqual(
-            window.video_annotation_project.sync.video_start_time,
-            original_start + timedelta(seconds=0.1),
-        )
+        with patch.object(window.preferences, "set_time_correction_seconds"):
+            window._videoPlayheadMoveFinished(playhead)
+        self.assertEqual(window.video_annotation_project.sync.video_start_time, original_start)
         self.assertAlmostEqual(window.video_annotation_project.sync.manual_offset_seconds, 0.0)
         self.assertAlmostEqual(window.video_annotation_project.sync.rate, 1.0)
-        self.assertTrue(window.video_sync_undo_button.isEnabled())
-        window.undoVideoSyncCalibration()
-        self.assertEqual(window.video_annotation_project.sync.video_start_time, original_start)
-        window._alignCurrentVideoToDasSample(100)
+        self.assertAlmostEqual(window.time_correction_seconds, -0.1)
+        self.assertEqual(
+            window._videoFrameTime(0),
+            window.data_timeline.absolute_time_for_sample(100),
+        )
+        self.assertIn(
+            format_wall_time(original_start),
+            window.video_time_label.text(),
+        )
+        with patch.object(window.preferences, "set_time_correction_seconds"):
+            window._alignCurrentVideoToDasSample(100)
         window.addVideoPointAnnotation()
         self.assertEqual(len(window.video_annotation_project.annotations), 1)
         self.assertEqual(window.video_annotation_project.annotations[0].start_sample, 100)
@@ -294,6 +301,16 @@ class VideoAnnotationChecks(unittest.TestCase):
             self.assertEqual(len(window.video_sequence_data_group.segments), 3)
             self.assertFalse(hasattr(window, "video_sequence_display_data"))
             self.assertIs(window._annotationTimeline(), window.video_sequence_timeline)
+            original_sequence_start = window.video_sequence_timeline.start_time
+            window.time_correction_seconds += 1.25
+            window.rebuildVideoSequenceTimeline()
+            self.assertAlmostEqual(
+                (
+                    window.video_sequence_timeline.start_time
+                    - original_sequence_start
+                ).total_seconds(),
+                1.25,
+            )
             self.assertIn("匹配 DAS：3 文件", window.video_sequence_status_label.text())
             self.assertIn("按窗口读取", window.video_sequence_status_label.text())
             self.assertIs(window.tab_widget.currentWidget(), window.video_compare_container)
