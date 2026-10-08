@@ -22,7 +22,9 @@ import numpy as np
 from .data_timeline import DataTimeline, format_wall_time
 
 
-PROJECT_SCHEMA_VERSION = 1
+PROJECT_SCHEMA_VERSION = 2
+GEOMETRY_LABELS = {"bbox": "事件框", "obb": "倾斜框", "kp": "关键点", "lin": "轨迹线"}
+VEHICLE_TYPES = ("大车", "小车", "电动车")
 VIDEO_FILENAME_TIME = re.compile(
     r"(?<!\d)((?:19|20)\d{2})(\d{2})(\d{2})[_-](\d{2})(\d{2})(\d{2})(?!\d)"
 )
@@ -180,6 +182,57 @@ class VideoAnnotation:
     sync_revision: int = 0
     visible: bool = True
     created_at: datetime = field(default_factory=datetime.now)
+    geometry_type: str = ""
+    vertices: List[List[float]] = field(default_factory=list)
+    channel_spacing_m: float = 4.0
+    vehicle_type: str = ""
+    lane: Optional[int] = None
+    travel_direction: str = ""
+
+    def set_vehicle_labels(self, vehicle_type: str, lane: Optional[int], direction: str) -> None:
+        vehicle_type = str(vehicle_type).strip()
+        if vehicle_type and vehicle_type not in VEHICLE_TYPES:
+            raise ValueError("车辆类别应为大车、小车或电动车")
+        lane = int(lane) if lane is not None else None
+        if lane is not None and lane not in range(1, 6):
+            raise ValueError("车道应为 1–5")
+        self.vehicle_type = vehicle_type
+        self.lane = lane
+        self.travel_direction = str(direction).strip()
+
+    @property
+    def shape_label(self) -> str:
+        return GEOMETRY_LABELS.get(self.geometry_type, "区间" if self.is_interval else "时点")
+
+    def set_geometry(self, geometry_type: str, vertices: Sequence[Sequence[float]]) -> None:
+        if geometry_type not in GEOMETRY_LABELS:
+            raise ValueError("不支持的标注形状")
+        points = [[int(round(float(p[0]))), float(p[1])] for p in vertices]
+        minimum = {"bbox": 4, "obb": 4, "kp": 1, "lin": 2}[geometry_type]
+        if len(points) < minimum or (geometry_type in ("bbox", "obb") and len(points) != 4):
+            raise ValueError("标注形状的节点数量无效")
+        if any(not np.isfinite(p).all() or p[0] < 0 or p[1] < 1 for p in points):
+            raise ValueError("标注节点必须位于有效的 DAS 样点与通道内")
+        self.geometry_type = geometry_type
+        self.vertices = points
+        self.source_domain = "das"
+        self.start_sample = min(p[0] for p in points)
+        self.end_sample = max(p[0] for p in points)
+
+    def track_measurement(self, sampling_rate: float):
+        """Projected cable speed, fitted in physical units, for a manual track."""
+        if self.geometry_type != "lin" or len(self.vertices) < 2:
+            return None
+        points = np.asarray(self.vertices, dtype=float)
+        times = points[:, 0] / float(sampling_rate)
+        distance = (points[:, 1] - 1) * self.channel_spacing_m
+        if np.ptp(times) <= 0:
+            return None
+        slope, intercept = np.polyfit(times - times[0], distance, 1)
+        residual = np.sum((distance - (slope * (times - times[0]) + intercept)) ** 2)
+        total = np.sum((distance - distance.mean()) ** 2)
+        r2 = 1.0 - residual / total if total > 0 else 1.0
+        return float(slope * 3.6), float(r2)
 
     @property
     def is_interval(self) -> bool:
@@ -206,6 +259,12 @@ class VideoAnnotation:
             "sync_revision": int(self.sync_revision),
             "visible": bool(self.visible),
             "created_at": self.created_at.isoformat(timespec="seconds"),
+            "geometry_type": self.geometry_type,
+            "vertices": self.vertices,
+            "channel_spacing_m": float(self.channel_spacing_m),
+            "vehicle_type": self.vehicle_type,
+            "lane": self.lane,
+            "travel_direction": self.travel_direction,
         }
 
     @classmethod
@@ -239,7 +298,7 @@ class VideoAnnotation:
             revision = max(0, int(value.get("sync_revision", 0)))
         except (TypeError, ValueError):
             revision = 0
-        return cls(
+        annotation = cls(
             identifier=identifier,
             kind=str(value.get("kind") or "车辆经过"),
             outcome=str(value.get("outcome") or "未核对"),
@@ -256,6 +315,15 @@ class VideoAnnotation:
             visible=bool(value.get("visible", True)),
             created_at=_datetime_from_text(value.get("created_at")) or datetime.now(),
         )
+        if value.get("geometry_type"):
+            annotation.set_geometry(str(value["geometry_type"]), value.get("vertices") or [])
+            spacing = float(value.get("channel_spacing_m", 4.0))
+            if not np.isfinite(spacing) or spacing <= 0:
+                raise ValueError("通道间距必须为正数")
+            annotation.channel_spacing_m = spacing
+        annotation.set_vehicle_labels(value.get("vehicle_type") or "", value.get("lane"),
+                                      value.get("travel_direction") or "")
+        return annotation
 
 
 @dataclass(frozen=True)
@@ -348,6 +416,8 @@ class AnnotationProject:
     calibration_anchors: List[Dict[str, int]] = field(default_factory=list)
     das_context: Dict[str, object] = field(default_factory=dict)
     project_path: str = ""
+    das_correction_seconds: Optional[float] = None
+    direction_labels: List[str] = field(default_factory=list)
 
     @property
     def camera_channel_range(self) -> tuple[int, int]:
@@ -463,6 +533,20 @@ class AnnotationProject:
     def annotation_by_identifier(self, identifier: int) -> Optional[VideoAnnotation]:
         return next((item for item in self.annotations if item.identifier == int(identifier)), None)
 
+    def add_geometry_annotation(
+        self, timeline: DataTimeline, geometry_type: str, vertices,
+        kind: str, outcome: str, note: str = "", channel_spacing_m: float = 4.0,
+    ) -> VideoAnnotation:
+        annotation = VideoAnnotation(
+            self.next_identifier(), str(kind).strip() or "车辆经过",
+            str(outcome).strip() or "未核对", 0, 0, self.camera_channel,
+            note=str(note).strip(), source_domain="das", channel_spacing_m=float(channel_spacing_m),
+        )
+        annotation.set_geometry(geometry_type, vertices)
+        annotation.start_video_ms = self.sync.video_position_for_sample(annotation.start_sample, timeline) or 0
+        self.annotations.append(annotation)
+        return annotation
+
     def delete_annotation(self, identifier: int) -> Optional[VideoAnnotation]:
         for index, annotation in enumerate(self.annotations):
             if annotation.identifier == int(identifier):
@@ -482,6 +566,8 @@ class AnnotationProject:
             },
             "sync": self.sync.to_dict(),
             "das_context": self.das_context,
+            "das_correction_seconds": self.das_correction_seconds,
+            "direction_labels": self.direction_labels,
             "calibration_anchors": [
                 {"video_position_ms": int(item["video_position_ms"]), "das_sample": int(item["das_sample"])}
                 for item in self.calibration_anchors
@@ -494,7 +580,7 @@ class AnnotationProject:
     def from_dict(cls, value: object) -> "AnnotationProject":
         if not isinstance(value, dict):
             raise ValueError("标注工程根节点必须是对象")
-        if int(value.get("schema_version", 0)) != PROJECT_SCHEMA_VERSION:
+        if int(value.get("schema_version", 0)) not in (1, PROJECT_SCHEMA_VERSION):
             raise ValueError("不支持的标注工程版本")
         video = value.get("video") if isinstance(value.get("video"), dict) else {}
         try:
@@ -524,6 +610,11 @@ class AnnotationProject:
                     })
                 except (KeyError, TypeError, ValueError):
                     continue
+        correction = value.get("das_correction_seconds")
+        if correction is not None:
+            correction = float(correction)
+            if not np.isfinite(correction):
+                raise ValueError("DAS 时间修正值无效")
         return cls(
             video_path=str(video.get("path") or ""),
             camera_name=str(video.get("camera_name") or "摄像头 A"),
@@ -535,6 +626,9 @@ class AnnotationProject:
             annotations=annotations,
             calibration_anchors=anchors,
             das_context=context,
+            das_correction_seconds=correction,
+            direction_labels=list(dict.fromkeys(str(item).strip() for item in value.get("direction_labels", [])
+                                                if str(item).strip())) if isinstance(value.get("direction_labels"), list) else [],
         )
 
     def save(self, path: str) -> None:
@@ -572,10 +666,15 @@ class AnnotationProject:
                     "das_start_sample", "das_end_sample", "das_start_time", "das_end_time",
                     "camera_name", "camera_channel", "trajectory_id", "time_residual_ms",
                     "source_domain", "sync_revision", "visible", "note",
+                    "geometry_type", "vertices_sample_channel", "vertices_time_channel",
+                    "channel_spacing_m", "projected_speed_kmh", "speed_fit_r2",
+                    "camera_start_time", "das_correction_seconds",
+                    "vehicle_type", "lane", "travel_direction",
                 ),
             )
             writer.writeheader()
             for annotation in self.annotations:
+                measurement = annotation.track_measurement(timeline.sampling_rate) if timeline else None
                 writer.writerow({
                     "annotation_id": annotation.identifier,
                     "kind": annotation.kind,
@@ -601,4 +700,19 @@ class AnnotationProject:
                     "sync_revision": annotation.sync_revision,
                     "visible": int(annotation.visible),
                     "note": annotation.note,
+                    "geometry_type": annotation.geometry_type or ("interval" if annotation.is_interval else "point"),
+                    "vertices_sample_channel": json.dumps(annotation.vertices),
+                    "vertices_time_channel": json.dumps([
+                        [format_wall_time(timeline.absolute_time_for_sample(p[0])), p[1]]
+                        for p in annotation.vertices
+                    ], ensure_ascii=False) if timeline else "",
+                    "channel_spacing_m": annotation.channel_spacing_m,
+                    "projected_speed_kmh": f"{measurement[0]:.3f}" if measurement else "",
+                    "speed_fit_r2": f"{measurement[1]:.4f}" if measurement else "",
+                    "camera_start_time": format_wall_time(self.sync.wall_time_for_video_position(annotation.start_video_ms))
+                    if self.sync.video_start_time is not None and annotation.source_domain == "video" else "",
+                    "das_correction_seconds": self.das_correction_seconds,
+                    "vehicle_type": annotation.vehicle_type,
+                    "lane": annotation.lane if annotation.lane is not None else "",
+                    "travel_direction": annotation.travel_direction,
                 })

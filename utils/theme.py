@@ -278,6 +278,17 @@ def apply_application_theme(application) -> None:
             color: {colors["text_primary"]};
             background-color: {colors["surface_subtle"]};
         }}
+        QWidget#annotationSidebar QPushButton, QWidget#annotationSidebar QComboBox,
+        QWidget#annotationSidebar QDateTimeEdit, QWidget#videoDasPanel QPushButton,
+        QWidget#videoDasPanel QComboBox, QWidget#videoDasPanel QSpinBox,
+        QWidget#videoDasPanel QDoubleSpinBox {{
+            min-height: 20px;
+            padding: 2px 5px;
+        }}
+        QWidget#annotationSidebar QGroupBox {{
+            margin-top: 10px;
+            padding-top: 7px;
+        }}
         QTableWidget, QListWidget {{
             color: {colors["text_primary"]};
             background-color: {colors["surface_panel"]};
