@@ -23,3 +23,16 @@ persist camera/DAS alignment, and integrate edit/undo/CSV workflows.
 The versioned Windows build includes this notice and the original license.
 Its sibling `DASViewer-v2.1.25-source.zip` contains the application source,
 requirements and build scripts used to produce the executable.
+
+# das_veh vehicle tracking code
+
+`utils/vendor/das_veh/tracking.py` and `car_tracking_utils.py` incorporate code
+from https://github.com/syyuan93/das_veh at commit
+`b1831d2d2a5636ec416095f9647a33881afaeed1`.
+
+Copyright (c) 2023 Siyuan Yuan. MIT license; the complete license is reproduced
+in `licenses/das_veh-LICENSE.txt`. The upstream attribution to TelecomTM is
+preserved. Source adaptation details are in `utils/vendor/das_veh/UPSTREAM.md`.
+
+DASViewer adds original-sampling-rate BIN adaptation, coordinate mapping,
+background cancellation, parameter controls and candidate review/storage.

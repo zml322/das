@@ -357,6 +357,10 @@ def analyze_prescreen(group, raw_data, visible_start, visible_end, channel_from,
                       parameters, cancel=None, progress: Callable | None = None):
     """Read/filter padding in bounded channel blocks, then crop proposals."""
     options = {**DEFAULT_PARAMETERS, **parameters}
+    if options.get('algorithm') == 'das_veh':
+        from .das_veh_tracking import analyze_das_veh
+        return analyze_das_veh(group, raw_data, visible_start, visible_end,
+                              channel_from, channel_to, parameters, cancel, progress)
     progress = progress or (lambda percent, message: None)
     if channel_to - channel_from + 1 < 8:
         raise ValueError('初筛至少需要 8 个可见通道，请先扩大通道范围')

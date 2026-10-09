@@ -14,6 +14,7 @@ from PyQt5.QtWidgets import (
 
 from .flow_layout import FlowLayout
 from .trajectory_prescreen import DEFAULT_PARAMETERS, PrescreenCancelled, analyze_prescreen
+from .das_veh_tracking import DEFAULT_DAS_VEH_PARAMETERS
 from .data_timeline import format_wall_time
 
 
@@ -23,23 +24,38 @@ class ReviewDialog(QDialog):
         self.controller = controller
         self.setWindowTitle('轨迹初筛与校对')
         self.setWindowModality(Qt.NonModal)
-        self.resize(650, 560)
+        self.resize(650, 680)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(10, 8, 10, 8)
         layout.setSpacing(5)
-        self.scope = QLabel('检测当前 DAS 视图；候选确认后才保存到工程')
+        self.scope = QLabel('检测当前可见时间与指定通道；候选确认后才保存到工程')
         self.scope.setWordWrap(True)
         layout.addWidget(self.scope)
         settings = QGroupBox('初筛参数')
         form = QFormLayout(settings)
         form.setRowWrapPolicy(QFormLayout.WrapLongRows)
+        self.algorithm = QComboBox()
+        self.algorithm.addItem('das_veh 原版卡尔曼 · 原始采样率', 'das_veh')
+        self.algorithm.addItem('已有片段连接 · 降采样', 'beam')
+        group, _timeline = controller.window._videoDataContext()
+        count = group.channel_count if group is not None else 520
+        self.channel_from = QSpinBox()
+        self.channel_to = QSpinBox()
+        for field in (self.channel_from, self.channel_to):
+            field.setRange(1, max(520, count))
+            field.setKeyboardTracking(False)
+        self.channel_from.setValue(290 if count >= 290 else 1)
+        self.channel_to.setValue(min(520, count))
+        form.addRow('跟踪算法', self.algorithm)
+        form.addRow('起始通道', self.channel_from)
+        form.addRow('结束通道', self.channel_to)
         self.sensitivity = QComboBox()
         for text, value in (('保守 · 减少误检', 2.0), ('均衡', 1.5), ('敏感 · 减少漏检', 1.0)):
             self.sensitivity.addItem(text, value)
         self.sensitivity.setCurrentIndex(1)
         self.minimum = QSpinBox()
         self.minimum.setRange(4, 2000)
-        self.minimum.setValue(12)
+        self.minimum.setValue(20)
         self.minimum.setSuffix(' 个有效通道')
         self.gaps = QSpinBox()
         self.gaps.setRange(0, 12)
@@ -55,15 +71,26 @@ class ReviewDialog(QDialog):
         advanced_form.setContentsMargins(0, 0, 0, 0)
         self.low = self._number(0.001, 1000, 0.01, ' Hz', 3)
         self.high = self._number(0.01, 1000, 1.0, ' Hz', 2)
-        self.speed_low = self._number(0.1, 1000, 7.2, ' km/h', 1)
-        self.speed_high = self._number(0.2, 1000, 216, ' km/h', 1)
-        self.tolerance = self._number(0.05, 3, 0.6, ' s', 2)
+        self.speed_low = self._number(0, 1000, 0, ' km/h', 1)
+        self.speed_low.setToolTip('0 表示不限制最低投影速度')
+        self.speed_high = self._number(0.2, 1000, 120, ' km/h', 1)
+        self.tolerance = self._number(0.05, 10, 1.2, ' s', 2)
+        self.separation = self._number(0.01, 60, 1, ' s', 2)
+        self.prominence_window = self._number(0.01, 240, 12, ' s', 2)
+        self.seed_sigma = self._number(0.001, 3, 0.08, ' s', 3)
+        self.sigma_a = self._number(0.000001, 10, 0.01, '', 6)
+        self.polarity = QComboBox()
+        for text, value in (('正负分别检测', 'both'), ('正峰', 'positive'), ('负峰', 'negative')):
+            self.polarity.addItem(text, value)
         self.direction = QComboBox()
         for text, value in (('双向', 'auto'), ('向通道增大', 'increasing'), ('向通道减小', 'decreasing')):
             self.direction.addItem(text, value)
         for title, field in (('滤波低频', self.low), ('滤波高频', self.high),
                              ('投影速度下限', self.speed_low), ('投影速度上限', self.speed_high),
-                             ('连接时间容差', self.tolerance), ('搜索方向', self.direction)):
+                             ('连接时间容差', self.tolerance), ('搜索方向', self.direction),
+                             ('信号极性', self.polarity), ('峰值最小间隔', self.separation),
+                             ('峰值评估窗口', self.prominence_window), ('起点合并宽度', self.seed_sigma),
+                             ('卡尔曼过程噪声', self.sigma_a)):
             advanced_form.addRow(title, field)
         self.advanced_scroll = QScrollArea()
         self.advanced_scroll.setWidgetResizable(True)
@@ -77,7 +104,7 @@ class ReviewDialog(QDialog):
         form.addRow(self.advanced_scroll)
         layout.addWidget(settings)
         actions = FlowLayout()
-        self.start = QPushButton('初筛当前视图')
+        self.start = QPushButton('跟踪当前时间范围')
         self.cancel = QPushButton('取消检测')
         self.cancel.setEnabled(False)
         self.start.clicked.connect(controller.start)
@@ -89,7 +116,7 @@ class ReviewDialog(QDialog):
         self.progress.setValue(0)
         layout.addLayout(actions)
         layout.addWidget(self.progress)
-        self.status = QLabel('选择范围后初筛；车辆、车道、方向使用主界面当前选项')
+        self.status = QLabel('原始采样率；0.01–1 Hz；0–120 km/h。人工标注不参与搜索。')
         self.status.setWordWrap(True)
         layout.addWidget(self.status)
         self.table = QTableWidget(0, 6)
@@ -121,7 +148,23 @@ class ReviewDialog(QDialog):
         hint = QLabel('虚线为未确认候选；双击编辑节点，Enter 提交修正。勾选后可批量确认。')
         hint.setWordWrap(True)
         layout.addWidget(hint)
+        self.algorithm.currentIndexChanged.connect(self._algorithm_changed)
         self.update_actions()
+
+    def _algorithm_changed(self):
+        original = self.algorithm.currentData() == 'das_veh'
+        self.channel_from.setEnabled(original)
+        self.channel_to.setEnabled(original)
+        self.polarity.setEnabled(original)
+        self.seed_sigma.setEnabled(original)
+        self.sigma_a.setEnabled(original)
+        self.minimum.setValue(20 if original else 12)
+        self.sensitivity.setCurrentIndex(1)
+        self.speed_low.setValue(0 if original else 7.2)
+        self.speed_high.setValue(120 if original else 216)
+        self.tolerance.setValue(1.2 if original else 0.6)
+        self.status.setText('原始采样率跟踪；人工标注不参与搜索。' if original else
+                            '已有算法使用降采样检测，并按当前视图的通道范围初筛。')
 
     @staticmethod
     def _number(minimum, maximum, value, suffix, decimals):
@@ -134,7 +177,9 @@ class ReviewDialog(QDialog):
         return field
 
     def parameters(self):
-        return {**DEFAULT_PARAMETERS,
+        defaults = DEFAULT_DAS_VEH_PARAMETERS if self.algorithm.currentData() == 'das_veh' else DEFAULT_PARAMETERS
+        return {**defaults, 'algorithm': self.algorithm.currentData(),
+                'channel_from': self.channel_from.value(), 'channel_to': self.channel_to.value(),
                 'peak_prominence': self.sensitivity.currentData(),
                 'minimum_track_channels': self.minimum.value(),
                 'maximum_missed_channels': self.gaps.value(),
@@ -142,6 +187,10 @@ class ReviewDialog(QDialog):
                 'minimum_speed': self.speed_low.value() / 3.6,
                 'maximum_speed': self.speed_high.value() / 3.6,
                 'tracking_tolerance': self.tolerance.value(),
+                'minimum_separation': self.separation.value(),
+                'prominence_window': self.prominence_window.value(),
+                'seed_sigma': self.seed_sigma.value(), 'sigma_a': self.sigma_a.value(),
+                'polarity': self.polarity.currentData(),
                 'direction': self.direction.currentData(),
                 'channel_spacing': self.controller.window.video_trajectory_dx_spin_box.value()}
 
@@ -237,6 +286,11 @@ class TrajectoryPrescreenController(QObject):
         ch_first = max(1, int(math.floor(y_range[0])) + origin)
         ch_last = min(group.channel_count, int(math.ceil(y_range[1])) + origin - 1)
         parameters = self.dialog.parameters()
+        if parameters['algorithm'] == 'das_veh':
+            ch_first, ch_last = parameters['channel_from'], parameters['channel_to']
+        if not 1 <= ch_first <= ch_last <= group.channel_count or ch_last - ch_first + 1 < 8:
+            self.dialog.status.setText(f'请指定来源范围内至少 8 个通道（来源共 {group.channel_count} 通道）')
+            return
         w._pauseForAnnotationDrawing()
         w.annotation_canvas.cancel()
         # Freeze the requested region for review instead of following playback.
@@ -249,7 +303,9 @@ class TrajectoryPrescreenController(QObject):
         self.started_at = time.perf_counter()
         self.dialog.scope.setText(
             f'{format_wall_time(timeline.absolute_time_for_sample(first))}–'
-            f'{format_wall_time(timeline.absolute_time_for_sample(last))}；通道 {ch_first}–{ch_last}')
+            f'{format_wall_time(timeline.absolute_time_for_sample(last))}；通道 {ch_first}–{ch_last}；'
+            + (f'{timeline.sampling_rate:g} Hz 原始采样率' if parameters['algorithm'] == 'das_veh' else '已有降采样算法'))
+        self.dialog.algorithm.setEnabled(False)
         self.dialog.start.setEnabled(False)
         self.dialog.cancel.setEnabled(True)
         self.dialog.progress.setValue(0)
@@ -283,6 +339,7 @@ class TrajectoryPrescreenController(QObject):
         self.future = None
         self.timer.stop()
         self.dialog.start.setEnabled(True)
+        self.dialog.algorithm.setEnabled(True)
         self.dialog.cancel.setEnabled(False)
         stale = future.prescreen_generation != self.generation or not self.context_matches(future.prescreen_context)
         try:
