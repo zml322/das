@@ -362,10 +362,10 @@ class AnnotationCanvas(QtCore.QObject):
         if self.busy:
             return
         menu = QtWidgets.QMenu(self.plot_widget)
-        edit = menu.addAction("编辑属性")
+        edit = menu.addAction("确认候选" if identifier < 0 else "编辑属性")
         shape = menu.addAction("编辑形状")
         shape.setEnabled(self._ann_geoms.get(identifier, (None,))[0] in TYPE_LABELS)
-        remove = menu.addAction("删除标注")
+        remove = menu.addAction("删除候选" if identifier < 0 else "删除标注")
         chosen = menu.exec_(QtGui.QCursor.pos())
         if chosen == edit:
             self.edit_requested.emit(identifier)
@@ -380,10 +380,11 @@ class AnnotationCanvas(QtCore.QObject):
         self._display_items.clear()
         self._ann_geoms.clear()
 
-    def render_shape(self, identifier, kind, points, label, selected=False, tooltip=""):
+    def render_shape(self, identifier, kind, points, label, selected=False, tooltip="", candidate=False):
         self._ann_geoms[identifier] = (kind, points)
-        color = "#2563eb" if selected else COLORS[kind]
-        pen = pg.mkPen(color, width=3 if selected else 2)
+        color = "#2563eb" if selected else ("#9a5b00" if candidate else COLORS[kind])
+        pen = pg.mkPen(color, width=3 if selected else 2,
+                       style=QtCore.Qt.DashLine if candidate else QtCore.Qt.SolidLine)
         xs, ys = np.asarray(points, dtype=float).T
         items = []
         if kind == "bbox":
@@ -397,7 +398,7 @@ class AnnotationCanvas(QtCore.QObject):
             if kind == "lin":
                 items.append(PolylineItem(xs, ys, pen=pen, ann_index=identifier))
             items.append(ScatterAnnotItem(xs, ys, pen=pen, brush=pg.mkBrush(color),
-                                          size=10, ann_index=identifier))
+                                          size=(6 if selected else 3) if candidate else 10, ann_index=identifier))
         for item in items:
             item.setZValue(40)
             item.setToolTip(tooltip)

@@ -66,6 +66,7 @@ from .classes.video_annotation import (
     trajectory_crossing_time,
 )
 from .classes.annotation_canvas import AnnotationCanvas
+from .classes.trajectory_prescreen_ui import TrajectoryPrescreenController
 from .classes.flow_layout import FlowLayout, control_group
 from .classes.video_media import cached_playable_video, probe_video
 from .classes.ffmpeg_video_player import FfmpegFrameWorker
@@ -1237,6 +1238,9 @@ class MainWindow(QMainWindow):
         self.video_reset_view_button = PushButton('复位视图')
         self.video_reset_view_button.setToolTip('恢复当前视频时间窗口和全部通道；无视频时恢复完整 DAS 图')
         self.video_reset_view_button.clicked.connect(self.resetVideoComparisonView)
+        self.video_prescreen_button = PushButton('轨迹初筛…')
+        self.video_prescreen_button.setToolTip('检测当前可见 DAS 范围，校对候选后确认保存')
+        self.video_prescreen_button.clicked.connect(lambda: self.trajectory_prescreen.show())
         das_controls = FlowLayout(spacing=4)
         das_controls.addWidget(control_group(Label('摄像头通道'), self.video_camera_channel_spin_box,
                                              self.video_camera_channel_apply_button))
@@ -1247,6 +1251,7 @@ class MainWindow(QMainWindow):
         das_controls.addWidget(control_group(Label('窗口'), self.video_window_combo))
         das_controls.addWidget(control_group(Label('dx'), self.video_trajectory_dx_spin_box))
         das_controls.addWidget(self.video_reset_view_button)
+        das_controls.addWidget(self.video_prescreen_button)
         das_controls.addWidget(self.video_focus_button)
         das_layout.addLayout(das_controls)
 
@@ -1297,6 +1302,7 @@ class MainWindow(QMainWindow):
         self.annotation_canvas.remove_requested.connect(self._deleteAnnotationFromPlot)
         self.annotation_canvas.state_changed.connect(self._annotationCanvasStateChanged)
         self.annotation_canvas.message.connect(self._showAnnotationMessage)
+        self.trajectory_prescreen = TrajectoryPrescreenController(self)
         if QVideoWidget is not None:
             self.video_player = QtMultimedia.QMediaPlayer(self)
             self.video_player.setVideoOutput(self.video_surface)
@@ -1640,6 +1646,8 @@ class MainWindow(QMainWindow):
     def updateVideoAnnotationDataContext(self):
         """Bind an annotation project only to its matching imported DAS source."""
 
+        if hasattr(self, 'trajectory_prescreen'):
+            self.trajectory_prescreen.invalidate()
         data_group, timeline = self._videoDataContext()
         if self.annotation_canvas is not None:
             self.annotation_canvas.cancel()
@@ -1677,6 +1685,7 @@ class MainWindow(QMainWindow):
                 self.video_follow_checkbox,
                 self.video_filter_button,
                 self.video_reset_view_button,
+                self.video_prescreen_button,
         ):
             widget.setEnabled(has_timeline)
         for widget in (
@@ -3171,6 +3180,9 @@ class MainWindow(QMainWindow):
         self._showAnnotationMessage(f'已保存 {annotation.shape_label} #{annotation.identifier}；右键可编辑属性或形状')
 
     def _updateDasGeometryAnnotation(self, identifier, kind, points):
+        if identifier < 0:
+            self.trajectory_prescreen.update_geometry(-identifier, points)
+            return
         annotation = self.video_annotation_project.annotation_by_identifier(identifier)
         if annotation is None:
             return
@@ -3187,6 +3199,11 @@ class MainWindow(QMainWindow):
         self._showAnnotationMessage(f'标注 #{identifier} 的形状已更新')
 
     def _selectAnnotationFromPlot(self, identifier):
+        if identifier < 0:
+            self.trajectory_prescreen.show()
+            self.trajectory_prescreen.select(-identifier)
+            self.trajectory_prescreen.refresh()
+            return
         for row in range(self.annotation_table.rowCount()):
             if self.annotation_table.item(row, 1).data(Qt.UserRole) == identifier:
                 self.annotation_table.selectRow(row)
@@ -3215,6 +3232,9 @@ class MainWindow(QMainWindow):
                 self._startNextVideoTrajectoryWork()
 
     def _editAnnotationProperties(self, identifier):
+        if identifier < 0:
+            self.trajectory_prescreen.accept([-identifier])
+            return
         annotation = self.video_annotation_project.annotation_by_identifier(identifier)
         if annotation is None:
             return
@@ -3272,6 +3292,9 @@ class MainWindow(QMainWindow):
         self.plotVideoComparisonImage(preserve_view=True)
 
     def _deleteAnnotationFromPlot(self, identifier):
+        if identifier < 0:
+            self.trajectory_prescreen.remove(-identifier)
+            return
         self.video_annotation_selected_id = identifier
         self.deleteSelectedVideoAnnotation()
 
@@ -3296,6 +3319,8 @@ class MainWindow(QMainWindow):
             self._deleteAnnotationFromPlot(identifier)
 
     def _clearAnnotationHistory(self):
+        if hasattr(self, 'trajectory_prescreen'):
+            self.trajectory_prescreen.invalidate()
         if self.annotation_canvas is not None:
             self.annotation_canvas.cancel()
         self._annotation_undo_stack.clear()
@@ -3493,6 +3518,7 @@ class MainWindow(QMainWindow):
 
         # 判断返回值，如果点击的是Yes按钮，我们就关闭组件和应用，否则就忽略关闭事件
         if reply == QMessageBox.Yes:
+            self.trajectory_prescreen.shutdown()
             self.video_trajectory_poll_timer.stop()
             self.video_media_poll_timer.stop()
             self.video_trajectory_executor.shutdown(wait=False, cancel_futures=True)
@@ -4912,6 +4938,7 @@ class MainWindow(QMainWindow):
         if self.video_annotation_context_matches:
             self._drawVideoCameraLine()
             self._drawVideoAnnotations()
+            self.trajectory_prescreen.render()
         self._drawVideoPlayhead()
         self._updateVideoPlayhead(self._currentVideoPosition(), force=True)
         if previous_range is not None:
