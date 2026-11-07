@@ -4286,7 +4286,6 @@ class MainWindow(QMainWindow):
             'channel_spacing': dx if dx > 0 else 4.0,
             'frequency_low': parameters.get('frequency_low', 0.01),
             'frequency_high': parameters.get('frequency_high', 1.0),
-            'target_sampling_rate': parameters.get('target_sampling_rate', 50.0),
             'seed_width': parameters.get('seed_width', 8),
             'peak_prominence': parameters.get('peak_prominence', 1.5),
             'minimum_separation': parameters.get('minimum_separation', 0.8),
@@ -6684,7 +6683,7 @@ class MainWindow(QMainWindow):
             self.sampling_times_to_num,
         )
         dialog = VehicleTrackingDialog(
-            self.origin_data,
+            self.raw_data,
             self.sampling_rate,
             visible_range=visible_range,
             settings=self._vehicle_tracking_settings,

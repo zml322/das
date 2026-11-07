@@ -259,11 +259,10 @@ class VehicleTrackingDialog(QDialog):
         advanced_form.addRow("最小有效覆盖率", self.minimum_coverage)
         self.maximum_missed_channels = self._spinbox(0, 1000, 3)
         advanced_form.addRow("允许连续缺失通道", self.maximum_missed_channels)
-        self.target_sampling_rate = self._double_spinbox(2.5, 10000.0, min(50.0, self.sampling_rate), decimals=1, step=5.0, suffix=" Hz")
-        advanced_form.addRow("内部目标采样率", self.target_sampling_rate)
+        advanced_form.addRow("处理采样率", QLabel(f"{self.sampling_rate:g} Hz（原始采样率，不降采样）"))
         root.addWidget(advanced_group)
 
-        self.status_label = QLabel("设置范围和参数后点击“开始拾取”。")
+        self.status_label = QLabel("4 阶零相位带通 → 中位数共模抑制 → 各通道 MAD 归一化。设置范围后点击“开始拾取”。")
         self.status_label.setWordWrap(True)
         root.addWidget(self.status_label)
 
@@ -409,7 +408,6 @@ class VehicleTrackingDialog(QDialog):
             "channel_spacing": spacing,
             "frequency_low": self.frequency_low.value(),
             "frequency_high": self.frequency_high.value(),
-            "target_sampling_rate": self.target_sampling_rate.value(),
             "seed_width": self.seed_width.value(),
             "peak_prominence": self.peak_prominence.value(),
             "minimum_separation": self.minimum_separation.value(),
@@ -455,7 +453,6 @@ class VehicleTrackingDialog(QDialog):
         fields = (
             (self.frequency_low, "frequency_low", float),
             (self.frequency_high, "frequency_high", float),
-            (self.target_sampling_rate, "target_sampling_rate", float),
             (self.seed_width, "seed_width", int),
             (self.peak_prominence, "peak_prominence", float),
             (self.minimum_separation, "minimum_separation", float),

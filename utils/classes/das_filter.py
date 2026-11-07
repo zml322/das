@@ -322,6 +322,12 @@ def apply_das_filter(
         method = str(parameters["method"])
         if method not in {"median", "mean"}:
             raise ValueError("共模噪声方法只能是 median 或 mean")
+        # DASPy divides by common-mode energy without guarding zero. A dead
+        # selection or symmetric channels can have an exactly zero median;
+        # in that case there is no common component to remove.
+        common = np.median(array, axis=0) if method == "median" else np.mean(array, axis=0)
+        if float(np.sum(common.astype(np.float64) ** 2)) <= np.finfo(float).eps:
+            return array.copy()
         try:
             from daspy.advanced_tools.denoising import (  # type: ignore
                 common_mode_noise_removal,

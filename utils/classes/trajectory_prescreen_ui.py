@@ -36,7 +36,7 @@ class ReviewDialog(QDialog):
         form.setRowWrapPolicy(QFormLayout.WrapLongRows)
         self.algorithm = QComboBox()
         self.algorithm.addItem('das_veh 原版卡尔曼 · 原始采样率', 'das_veh')
-        self.algorithm.addItem('已有片段连接 · 降采样', 'beam')
+        self.algorithm.addItem('已有片段连接 · 原始采样率', 'beam')
         group, _timeline = controller.window._videoDataContext()
         count = group.channel_count if group is not None else 520
         self.channel_from = QSpinBox()
@@ -116,7 +116,7 @@ class ReviewDialog(QDialog):
         self.progress.setValue(0)
         layout.addLayout(actions)
         layout.addWidget(self.progress)
-        self.status = QLabel('原始采样率；0.01–1 Hz；0–120 km/h。人工标注不参与搜索。')
+        self.status = QLabel('原始采样率；4 阶零相位带通 → 中位数共模抑制 → 各通道 MAD。人工标注不参与搜索。')
         self.status.setWordWrap(True)
         layout.addWidget(self.status)
         self.table = QTableWidget(0, 6)
@@ -163,8 +163,8 @@ class ReviewDialog(QDialog):
         self.speed_low.setValue(0 if original else 7.2)
         self.speed_high.setValue(120 if original else 216)
         self.tolerance.setValue(1.2 if original else 0.6)
-        self.status.setText('原始采样率跟踪；人工标注不参与搜索。' if original else
-                            '已有算法使用降采样检测，并按当前视图的通道范围初筛。')
+        self.status.setText('4 阶零相位带通 → 中位数共模抑制 → 各通道 MAD；不降采样。'
+                            + ('人工标注不参与搜索。' if original else '按当前视图的通道范围初筛。'))
 
     @staticmethod
     def _number(minimum, maximum, value, suffix, decimals):
@@ -304,15 +304,13 @@ class TrajectoryPrescreenController(QObject):
         self.dialog.scope.setText(
             f'{format_wall_time(timeline.absolute_time_for_sample(first))}–'
             f'{format_wall_time(timeline.absolute_time_for_sample(last))}；通道 {ch_first}–{ch_last}；'
-            + (f'{timeline.sampling_rate:g} Hz 原始采样率' if parameters['algorithm'] == 'das_veh' else '已有降采样算法'))
+            + f'{timeline.sampling_rate:g} Hz 原始采样率（不降采样）')
         self.dialog.algorithm.setEnabled(False)
         self.dialog.start.setEnabled(False)
         self.dialog.cancel.setEnabled(True)
         self.dialog.progress.setValue(0)
         self.dialog.status.setText('正在初筛；可取消。播放跟随已关闭，便于校对。')
         raw_data = None if w.video_sequence_data_group is not None else getattr(w, 'raw_data', None)
-        if raw_data is None and w.video_sequence_data_group is None:
-            raw_data = getattr(w, 'origin_data', None)
         if self.executor is None:
             self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix='das-prescreen')
         context = self.context

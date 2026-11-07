@@ -12,11 +12,12 @@ site-specific geometry and legacy SciPy dependencies.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from fractions import Fraction
 from typing import Dict, Iterable, List, Sequence, Tuple
 
 import numpy as np
 from scipy import signal
+
+from .vehicle_preprocessing import preprocess_vehicle_response
 
 
 @dataclass
@@ -79,9 +80,6 @@ def _validate_parameters(
         "channel_spacing": _float_parameter(parameters, "channel_spacing", 0.0),
         "frequency_low": _float_parameter(parameters, "frequency_low", 0.01),
         "frequency_high": _float_parameter(parameters, "frequency_high", 1.0),
-        "target_sampling_rate": _float_parameter(
-            parameters, "target_sampling_rate", 50.0
-        ),
         "seed_width": _int_parameter(parameters, "seed_width", 8),
         "peak_prominence": _float_parameter(parameters, "peak_prominence", 1.5),
         "minimum_separation": _float_parameter(
@@ -108,7 +106,6 @@ def _validate_parameters(
     spacing = float(options["channel_spacing"])
     low = float(options["frequency_low"])
     high = float(options["frequency_high"])
-    target = float(options["target_sampling_rate"])
     minimum_speed = float(options["minimum_speed"])
     maximum_speed = float(options["maximum_speed"])
     coverage = float(options["minimum_coverage"])
@@ -118,8 +115,6 @@ def _validate_parameters(
         raise ValueError("请填写真实的相邻通道距离 dx（米），不能使用 gauge length")
     if not (0 < low < high < nyquist):
         raise ValueError(f"低频和高频必须满足 0 < 低频 < 高频 < {nyquist:g} Hz")
-    if not np.isfinite(target) or target < 2.5 * high:
-        raise ValueError("目标采样率至少应为最高跟踪频率的 2.5 倍")
     if minimum_speed <= 0 or maximum_speed <= minimum_speed:
         raise ValueError("投影速度范围无效")
     if not 0 < coverage <= 1:
@@ -149,77 +144,22 @@ def _validate_parameters(
     return options
 
 
-def _replace_bad_traces(data: np.ndarray) -> np.ndarray:
-    """Interpolate empty or exceptionally energetic channels from neighbours."""
-
-    result = np.asarray(data, dtype=np.float64).copy()
-    scales = np.median(np.abs(result), axis=1)
-    center = float(np.median(scales))
-    mad = float(np.median(np.abs(scales - center)))
-    spread = max(1.4826 * mad, np.finfo(float).eps)
-    bad = (scales <= np.finfo(float).eps) | (scales > center + 6.0 * spread)
-    good_indices = np.flatnonzero(~bad)
-    if good_indices.size < 2:
-        return result
-
-    for index in np.flatnonzero(bad):
-        left_candidates = good_indices[good_indices < index]
-        right_candidates = good_indices[good_indices > index]
-        if left_candidates.size and right_candidates.size:
-            left = int(left_candidates[-1])
-            right = int(right_candidates[0])
-            ratio = (index - left) / (right - left)
-            result[index] = (1.0 - ratio) * result[left] + ratio * result[right]
-        elif left_candidates.size:
-            result[index] = result[int(left_candidates[-1])]
-        elif right_candidates.size:
-            result[index] = result[int(right_candidates[0])]
-    return result
-
-
-def _robust_trace_normalize(data: np.ndarray) -> np.ndarray:
-    centered = data - np.median(data, axis=1, keepdims=True)
-    scales = np.median(np.abs(centered), axis=1, keepdims=True) * 1.4826
-    scales = np.maximum(scales, np.finfo(float).eps)
-    return centered / scales
-
-
-def _downsample(data: np.ndarray, sampling_rate: float, target_rate: float) -> Tuple[np.ndarray, float]:
-    if sampling_rate <= target_rate * 1.05:
-        return data, sampling_rate
-    fraction = Fraction(target_rate / sampling_rate).limit_denominator(2000)
-    reduced = signal.resample_poly(data, fraction.numerator, fraction.denominator, axis=1)
-    return reduced, sampling_rate * fraction.numerator / fraction.denominator
-
-
 def prepare_vehicle_tracking_data(
     data: np.ndarray, sampling_rate: float, parameters: Dict[str, object]
 ) -> Tuple[np.ndarray, float, Dict[str, object]]:
     """Run the non-mutating preprocessing shared by picker and video view.
 
-    Keeping this stage public lets the long-video workflow display precisely
-    the bad-channel-repaired, band-passed, downsampled data on which it bases
-    its trajectory candidates.  The caller receives a new array.
+    Apply the grayscale vehicle-response chain at the acquired sampling rate.
+    The caller receives a new array with the original shape and sample grid.
     """
-    array = np.asarray(data, dtype=np.float64)
+    array = np.asarray(data)
     if array.ndim != 2 or min(array.shape) == 0:
         raise ValueError("车辆轨迹拾取需要非空的二维 DAS 数据（通道 × 采样点）")
     options = _validate_parameters(array.shape, float(sampling_rate), parameters)
     if not np.all(np.isfinite(array)):
         raise ValueError("输入数据含有 NaN 或无穷值，无法进行车辆轨迹拾取")
-    working = array.copy()
-    low = float(options["frequency_low"])
-    high = float(options["frequency_high"])
-    sos = signal.butter(4, [low, high], btype="bandpass", fs=float(sampling_rate), output="sos")
-    # Repair dead/saturated traces before the zero-phase filter.  A bad trace
-    # otherwise smears its transient across the long low-frequency window.
-    repaired = _replace_bad_traces(working)
-    filtered = signal.sosfiltfilt(sos, repaired, axis=1)
-    normalized = _robust_trace_normalize(filtered)
-    tracking_data, tracking_rate = _downsample(
-        normalized, float(sampling_rate), float(options["target_sampling_rate"])
-    )
-    return tracking_data, tracking_rate, options
+    tracking_data = preprocess_vehicle_response(array, sampling_rate, options)
+    return tracking_data, float(sampling_rate), options
 
 
 def _peaks_for_trace(

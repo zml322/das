@@ -1,6 +1,6 @@
 """CPU-only, cancellable trajectory proposals in canonical DAS coordinates.
 
-Filtering is performed on anti-aliased, channel-block downsampled data. A small
+Filtering preserves the original sampling rate and all channels. A small
 beam follows signed peaks in both spatial directions; proposals are never
 annotations until the user confirms them.
 """
@@ -12,9 +12,8 @@ import numpy as np
 from scipy import signal
 from scipy.ndimage import gaussian_filter
 
-from .data_group import ensure_memory_budget
-from .vehicle_tracking import _downsample, VehicleTrajectory
-from .video_trajectory import read_group_window
+from .vehicle_tracking import VehicleTrajectory
+from .vehicle_preprocessing import read_vehicle_response
 
 DEFAULT_PARAMETERS = {
     'frequency_low': 0.01, 'frequency_high': 1.0, 'channel_spacing': 4.0,
@@ -355,70 +354,22 @@ def detect_tracks(data, sampling_rate, options, *, sample_origin=0, channel_orig
 
 def analyze_prescreen(group, raw_data, visible_start, visible_end, channel_from, channel_to,
                       parameters, cancel=None, progress: Callable | None = None):
-    """Read/filter padding in bounded channel blocks, then crop proposals."""
+    """Use the shared full-rate grayscale response, then crop proposals."""
     options = {**DEFAULT_PARAMETERS, **parameters}
     if options.get('algorithm') == 'das_veh':
         from .das_veh_tracking import analyze_das_veh
         return analyze_das_veh(group, raw_data, visible_start, visible_end,
                               channel_from, channel_to, parameters, cancel, progress)
     progress = progress or (lambda percent, message: None)
-    if channel_to - channel_from + 1 < 8:
-        raise ValueError('初筛至少需要 8 个可见通道，请先扩大通道范围')
-    if visible_end <= visible_start:
-        raise ValueError('当前视图没有有效的 DAS 时间范围')
     if options['minimum_speed'] <= 0 or options['maximum_speed'] <= options['minimum_speed']:
         raise ValueError('投影速度上限必须大于正的下限')
     fs = float(group.sampling_rate)
-    if not 0 < options['frequency_low'] < options['frequency_high'] < fs / 2:
-        raise ValueError('滤波频率需满足 0 < 低频 < 高频 < 原始采样率的一半')
     if options['channel_spacing'] <= 0:
         raise ValueError('通道间距 dx 必须大于 0')
-    padding = int(np.ceil(max(5, 1 / options['frequency_low']) * fs))
-    start = max(0, int(visible_start) - padding)
-    end = min(group.total_samples, int(visible_end) + padding)
-    duration = (end - start) / fs
-    if duration < 5:
-        raise ValueError('来源数据不足 5 秒，无法稳定进行低频轨迹初筛')
-    notes = []
-    low = max(options['frequency_low'], 2 / duration)
-    if low >= options['frequency_high']:
-        raise ValueError('来源数据太短，无法使用当前滤波频段，请提高频率上限')
-    if low > options['frequency_low'] + 1e-9:
-        notes.append(f'短记录的滤波低频下限调整为 {low:.3g} Hz')
-    target_rate = min(fs, max(50.0, 5 * options['frequency_high']))
-    ensure_memory_budget(channel_to - channel_from + 1, int(duration * target_rate) + 2,
-                         32.0, '轻量轨迹初筛')
-    blocks = []
-    for first in range(channel_from, channel_to + 1, 16):
-        check_cancel(cancel)
-        last = min(first + 15, channel_to)
-        if raw_data is None:
-            block = read_group_window(group, start, end, first, last)
-        else:
-            if raw_data.shape != (group.channel_count, group.total_samples):
-                raise ValueError('原始数据与 DAS 来源范围不一致，请重新载入数据')
-            block = np.array(raw_data[first - 1:last, start:end], dtype=np.float32, copy=True)
-        block, reduced_rate = _downsample(block, fs, target_rate)
-        blocks.append(np.asarray(block, dtype=np.float32))
-        progress(int(30 * (last - channel_from + 1) / (channel_to - channel_from + 1)), '读取并降采样 DAS 数据')
-    check_cancel(cancel)
-    data = np.concatenate(blocks).astype(np.float64)
-    del blocks
-    if not np.isfinite(data).all():
-        raise ValueError('DAS 数据含有 NaN 或无穷值，无法初筛')
-    data -= np.median(data, axis=0, keepdims=True)
-    # Nearby channels observe the same passage with small delays. Modest
-    # smoothing suppresses isolated extrema while retaining slanted responses.
-    data = gaussian_filter(data, sigma=(0.8, max(0.5, reduced_rate * 0.025)))
-    sos = signal.butter(4, [low, options['frequency_high']], btype='bandpass', fs=reduced_rate, output='sos')
-    data = signal.sosfiltfilt(sos, data, axis=1)
-    center = np.median(data, axis=1, keepdims=True)
-    scale = 1.4826 * np.median(np.abs(data - center), axis=1, keepdims=True)
-    valid = scale[:, 0] > max(float(np.median(scale)) * 1e-4, 1e-12)
-    data = (data - center) / np.maximum(scale, 1e-12)
-    data[~valid] = 0
-    check_cancel(cancel)
-    result = detect_tracks(data, reduced_rate, options, original_rate=fs,
+    data, start, notes = read_vehicle_response(
+        group, raw_data, visible_start, visible_end, channel_from, channel_to,
+        options, check_cancel=lambda: check_cancel(cancel), progress=progress)
+    result = detect_tracks(data, fs, options, original_rate=fs,
                            sample_origin=start, channel_origin=channel_from,
                            sample_bounds=(visible_start, visible_end), cancel=cancel, progress=progress)
     return PrescreenResult(result.proposals, tuple(notes) + result.notes)

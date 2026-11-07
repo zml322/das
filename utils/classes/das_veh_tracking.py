@@ -10,8 +10,7 @@ import numpy as np
 from scipy import signal
 
 from ..vendor.das_veh.tracking import KF_tracking
-from .data_group import ensure_memory_budget
-from .video_trajectory import read_group_window
+from .vehicle_preprocessing import read_vehicle_response
 from .trajectory_prescreen import (
     PrescreenResult, TrackProposal, check_cancel, simplify_track,
 )
@@ -220,48 +219,9 @@ def analyze_das_veh(group, raw_data, visible_start, visible_end, channel_from, c
     """Read padded blocks and filter every original sample at the supplied fs."""
     options = _options(parameters)
     fs = float(group.sampling_rate)
-    if not np.isfinite(fs) or fs <= 0:
-        raise ValueError('采样率无效')
-    if channel_from < 1 or channel_to > group.channel_count or channel_to - channel_from + 1 < 8:
-        raise ValueError('检测范围至少需要 8 个有效通道，且不能超出来源通道范围')
-    if not 0 <= visible_start < visible_end <= group.total_samples:
-        raise ValueError('检测时间范围无效')
-    low, high = options['frequency_low'], options['frequency_high']
-    if not 0 < low < high < fs / 2:
-        raise ValueError('滤波频率需满足 0 < 低频 < 高频 < 原始采样率的一半')
-    if raw_data is not None and raw_data.shape != (group.channel_count, group.total_samples):
-        raise ValueError('原始数据与 DAS 来源范围不一致，请重新载入数据')
-    check_cancel(cancel)
-    progress = progress or (lambda percent, message: None)
-    padding = int(np.ceil(fs / low))
-    start, end = max(0, int(visible_start) - padding), min(group.total_samples, int(visible_end) + padding)
-    if (end - start) / fs < 2 / low:
-        raise ValueError(f'当前来源不足 {2 / low:g} 秒，无法稳定使用 {low:g} Hz；不会自动改变滤波频段')
-    notes = []
-    if start > visible_start - padding or end < visible_end + padding:
-        notes.append('来源边界限制了滤波补充数据，请复查窗口两端候选')
-    rows, samples = channel_to - channel_from + 1, end - start
-    ensure_memory_budget(rows, samples, 6.0, '全采样率车辆跟踪')
-    # SOS preserves numerical stability for 0.01 Hz at 1000 Hz. Order 10
-    # follows upstream modules.utils.bandpass_data; no spatial grid conversion.
-    sos = signal.butter(10, [low, high], btype='bandpass', fs=fs, output='sos')
-    data = np.empty((rows, samples), dtype=np.float32)
-    for first in range(channel_from, channel_to + 1, 8):
-        check_cancel(cancel)
-        last = min(first + 7, channel_to)
-        block = (read_group_window(group, start, end, first, last) if raw_data is None else
-                 np.array(raw_data[first - 1:last, start:end], copy=True))
-        if not np.isfinite(block).all():
-            raise ValueError('DAS 数据含有 NaN 或无穷值，无法跟踪')
-        block = signal.sosfiltfilt(sos, np.asarray(block, dtype=np.float64), axis=1)
-        check_cancel(cancel)
-        center = np.median(block, axis=1, keepdims=True)
-        scale = 1.4826 * np.median(np.abs(block - center), axis=1, keepdims=True)
-        valid = scale[:, 0] > 1e-12
-        block = (block - center) / np.maximum(scale, 1e-12)
-        block[~valid] = 0
-        data[first - channel_from:last - channel_from + 1] = block
-        progress(int(35 * (last - channel_from + 1) / rows), f'按 {fs:g} Hz 读取、滤波和归一化')
+    data, start, notes = read_vehicle_response(
+        group, raw_data, visible_start, visible_end, channel_from, channel_to,
+        options, check_cancel=lambda: check_cancel(cancel), progress=progress)
     result = detect_das_veh_tracks(data, fs, options, sample_origin=start, channel_origin=channel_from,
                                    sample_bounds=(visible_start, visible_end), cancel=cancel, progress=progress)
     return PrescreenResult(result.proposals, tuple(notes) + result.notes)

@@ -10,10 +10,10 @@ from scipy import signal
 
 from .data_group import DataGroup, ensure_memory_budget
 from .das_filter import apply_das_filter
+from .vehicle_preprocessing import preprocess_vehicle_response
 from .vehicle_tracking import (
     VehicleTrajectory,
     pick_vehicle_trajectories,
-    prepare_vehicle_tracking_data,
 )
 from ..bin_reader import bin_window
 
@@ -158,31 +158,8 @@ def _process_display_data(
             float(sampling_rate),
         )
 
-    # Preserve every acquired sample in the displayed vehicle-response image.
-    # Trajectory detection has its own internal resampling path and must not
-    # reduce the resolution of the user-facing DAS data.
-    low = float(parameters.get("frequency_low", 0.01))
-    high = float(parameters.get("frequency_high", 1.0))
-    filtered = apply_das_filter(
-        np.asarray(data, dtype=np.float32),
-        float(sampling_rate),
-        "bandpass",
-        {
-            "frequency_low": low,
-            "frequency_high": min(high, float(sampling_rate) / 2.0 * 0.9),
-            "order": 4,
-            "zero_phase": True,
-        },
-    )
-    if filtered.shape[0] >= 2:
-        filtered = apply_das_filter(
-            filtered,
-            float(sampling_rate),
-            "common_mode",
-            {"method": str(parameters.get("common_mode_method", "median"))},
-        )
     return (
-        apply_das_filter(filtered, float(sampling_rate), "mad_normalize", {}),
+        preprocess_vehicle_response(data, sampling_rate, parameters),
         float(sampling_rate),
     )
 
@@ -209,12 +186,8 @@ def analyze_group_window(
     )
     trajectories: Tuple[VehicleTrajectory, ...] = ()
     if bool(parameters.get("detect_trajectories", True)):
-        # Keep detection on the established low-frequency pipeline.  In the
-        # default vehicle display mode this is the same signal family shown to
-        # the user; other display modes remain useful for visual comparison.
-        _tracking_data, _tracking_rate, _options = prepare_vehicle_tracking_data(
-            data, data_group.sampling_rate, parameters
-        )
+        # Detection always starts from raw samples and uses the same vehicle
+        # response chain, even when a comparison display mode is selected.
         trajectories = tuple(pick_vehicle_trajectories(
             data,
             data_group.sampling_rate,
