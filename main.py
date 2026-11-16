@@ -14,7 +14,7 @@ from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QIcon
 from PyQt5.QtWidgets import QApplication
 from utils.function import resourcePath
-from utils.mainwindow import MainWindow
+from ui.main_window import MainWindow
 from utils.theme import apply_application_theme
 from utils.version import __version__
 

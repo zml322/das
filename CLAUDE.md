@@ -6,6 +6,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 DASViewer is a PyQt5-based application for viewing and processing Distributed Acoustic Sensing (DAS) signals. It handles proprietary BIN format files with a 20-float (80-byte) header, provides real-time visualization, filtering, and video synchronization for fiber-optic sensing data analysis.
 
+**架构状态**: 2026-11-16重构完成，采用模块化分层架构。详见`ARCHITECTURE.md`。
+
+**架构状态**: 2026-11-16重构完成，采用模块化分层架构。详见`ARCHITECTURE.md`。
+
 ## Development Commands
 
 ### Environment Setup
@@ -41,94 +45,128 @@ Build outputs go to `dist/v{version}/` (Windows) or `dist/macos/` (macOS).
 
 ### Testing
 ```bash
-# Run all test checks
-python test/filter_pipeline_check.py
-python test/timeline_check.py
-python test/speed_ruler_check.py
-python test/mad_normalization_check.py
-python test/daspy_conversion_check.py
-python test/video_annotation_check.py
-python test/video_pipeline_check.py
-
 # Validate Python syntax across the codebase
-python -m compileall .
+python -m compileall core ui services vendor utils
 
 # Check dependency integrity
 pip check
 ```
 
-## Architecture
+## Architecture (重构后)
 
-### Data Flow
+### 新目录结构
 
-1. **Import Layer** (`utils/bin_reader.py`):
+```
+das/
+├── core/                   # 核心业务逻辑层（与UI无关）
+│   ├── data/              # BIN文件读取、数据分组、时间轴
+│   ├── filter/            # 二维滤波、管道重放、历史管理
+│   ├── analysis/          # 频谱、小波、EMD、特征提取
+│   ├── video/             # 视频标注、媒体处理、轨迹分析
+│   ├── tracking/          # 车辆追踪、轨迹筛选、速度标尺
+│   └── export/            # DASPy格式导出
+│
+├── ui/                    # 用户界面层
+│   ├── main_window.py     # 主窗口框架（7252行，暂未拆分）
+│   ├── dialogs/           # 功能对话框
+│   ├── widgets/           # 自定义控件
+│   ├── tabs/              # Tab页面（预留，未来拆分）
+│   └── components/        # UI组件（预留）
+│
+├── services/              # 应用服务层
+│   └── preferences.py     # 用户设置持久化
+│
+├── utils/                 # 通用工具
+│   ├── function.py        # 通用函数
+│   ├── theme.py           # 主题样式
+│   ├── plot.py            # 绘图辅助
+│   └── version.py         # 版本信息
+│
+├── vendor/                # 第三方代码
+│   └── das_veh/           # DAS车辆追踪算法
+│
+└── image/                 # 图像资源
+```
+
+### Data Flow (保持不变)
+
+1. **Import Layer** (`core/data/bin_reader.py`):
    - Reads proprietary BIN format with 20-float header
    - Auto-detects endianness (little/big) via date field validation
    - Returns data as `(channels, samples)` numpy arrays
    - Supports full file loading (`bin2numpy`) and windowed reading (`bin_window`)
 
 2. **Data Management**:
-   - `DataGroup` (`utils/classes/data_group.py`): Stitches multiple BIN files into continuous timelines with memory budget management
-   - `DataTimeline` (`utils/classes/data_timeline.py`): Manages temporal metadata and file-to-time mapping
+   - `DataGroup` (`core/data/data_group.py`): Stitches multiple BIN files into continuous timelines with memory budget management
+   - `DataTimeline` (`core/data/data_timeline.py`): Manages temporal metadata and file-to-time mapping
    - `raw_data`: Immutable baseline kept separate from filtered results
 
-3. **Filter Pipeline** (`utils/classes/das_filter.py`, `filter_pipeline.py`):
+3. **Filter Pipeline** (`core/filter/das_filter.py`, `core/filter/filter_pipeline.py`):
    - Edit/apply separation: modifying steps does NOT auto-compute
    - `FilterStep`: Immutable operation with algorithm, parameters, selection rectangle, enabled flag
    - `FilterPipeline`: Ordered collection that replays from `raw_data` on "Apply"
    - Supports per-segment and continuous stitching modes
    - History management: recent entries + named presets stored in preferences
 
-4. **Visualization** (`utils/mainwindow.py`, `utils/plot.py`):
+4. **Visualization** (`ui/main_window.py`, `utils/plot.py`):
    - PyQtGraph for real-time DAS waterfall plots
    - Matplotlib for frequency/wavelet analysis
    - Custom file segment bar for navigating stitched datasets
    - Video synchronization with trajectory overlay
 
-5. **Video Integration** (`utils/classes/video_*.py`):
+5. **Video Integration** (`core/video/*.py`):
    - `AnnotationProject`: Sidecar JSON workflow, never modifies DAS data
    - Dual playback backends: Qt multimedia (default) and FFmpeg fallback
    - Trajectory analysis: correlates DAS events with video timeline
    - Speed ruler: measure projected speeds from DAS waterfall ROI
 
-### Key Classes
+### Key Classes (重构后路径)
 
-- **MainWindow** (`utils/mainwindow.py`): 7000+ line monolithic Qt window managing all UI state and coordination
-- **BinaryImageHandler**: Threshold-based binarization (Otsu, two-peaks methods)
-- **DASFilterDialog**: Two-dimensional filtering UI (bandpass, notch, median, FK, MAD normalization)
-- **VehicleTrackingDialog**: Cross-correlation vehicle trajectory detection
-- **EMDHandler**, **DWTHandler**, **CWTHandler**, **DWPTHandler**: Signal decomposition tools
-- **SpectrumHandler**: FFT analysis
-- **SNRCalculator**: Signal-to-noise ratio computation
-- **FeatureCalculator**: Energy/variance/zero-crossing feature extraction
-- **DASPyConverterDialog**: Export BIN → DASPy formats (PKL, HDF5, SEG-Y)
+- **MainWindow** (`ui/main_window.py`): 7252行主窗口，管理所有UI状态和协调（未来将拆分）
+- **DASFilterDialog** (`core/filter/das_filter.py`): 二维滤波UI（带通、陷波、中值、FK、MAD归一化）
+- **VehicleTrackingDialog** (`ui/dialogs/vehicle_tracking_dialog.py`): 车辆追踪参数配置
+- **BinaryImageHandler** (`core/analysis/binary_image.py`): 阈值二值化（Otsu、双峰法）
+- **EMDHandler** (`core/analysis/emd.py`): 经验模态分解
+- **DWTHandler, CWTHandler** (`core/analysis/wavelet.py`): 小波变换
+- **DWPTHandler** (`core/analysis/wavelet_packet.py`): 小波包分解
+- **SpectrumHandler** (`core/analysis/spectrum.py`): FFT频谱分析
+- **SNRCalculator** (`core/analysis/snr.py`): 信噪比计算
+- **FeatureCalculator** (`core/analysis/feature.py`): 特征提取
+- **DASPyConverterDialog** (`ui/dialogs/daspy_converter_dialog.py`): DASPy格式导出
 
-### File Organization
+### File Organization (重构后)
 
 ```
-utils/
-  mainwindow.py          # Primary application window (all tabs, menus, state)
-  bin_reader.py          # BIN format I/O with header validation
-  widget.py              # Custom PyQt5 widgets
-  theme.py               # Application styling and dark mode support
-  plot.py                # Matplotlib/PyQtGraph plot helpers
-  function.py            # Utility functions
-  preferences.py         # User settings persistence
-  version.py             # Single source of truth for __version__
-  classes/               # Domain logic modules
-    das_filter.py        # 2D filter algorithms and UI
-    filter_pipeline.py   # Immutable filter history replay
-    filter_history.py    # Preset management
-    data_group.py        # Multi-file stitching
-    data_timeline.py     # Temporal coordinate system
-    video_annotation.py  # Video/DAS alignment
-    video_media.py       # Format conversion and playback prep
-    ffmpeg_video_player.py  # FFmpeg fallback player
-    video_trajectory.py  # Background trajectory analysis
-    vehicle_tracking.py  # Cross-correlation detector
-    speed_ruler.py       # Speed measurement from ROI
-    daspy_conversion.py  # BIN → DASPy export logic
-    [wavelet/emd/spectrum/snr/feature].py  # Analysis tools
+core/                      # 核心业务逻辑
+  data/
+    bin_reader.py          # BIN格式I/O
+    data_group.py          # 多文件拼接
+    data_timeline.py       # 时间轴管理
+  filter/
+    das_filter.py          # 滤波算法和UI
+    filter_pipeline.py     # 不可变管道重放
+    filter_history.py      # 历史管理
+  analysis/                # 信号分析工具
+  video/                   # 视频处理
+  tracking/                # 车辆追踪
+  export/                  # 数据导出
+
+ui/                        # 用户界面
+  main_window.py           # 主窗口（暂未拆分）
+  dialogs/                 # 功能对话框
+  widgets/                 # 自定义控件
+  
+services/                  # 应用服务
+  preferences.py           # 用户设置
+  
+utils/                     # 通用工具
+  function.py              # 工具函数
+  theme.py                 # 应用样式
+  plot.py                  # 绘图辅助
+  version.py               # 版本信息
+  
+vendor/                    # 第三方代码
+  das_veh/                 # 车辆追踪算法
 ```
 
 ## Development Notes
@@ -177,11 +215,11 @@ utils/
 - Run before release to catch semantic regressions
 - `compileall` and `pip check` for basic integrity
 
-## Common Patterns
+## Common Patterns (重构后)
 
 ### Reading DAS Data
 ```python
-from utils.bin_reader import bin2numpy, read_bin_header
+from core.data.bin_reader import bin2numpy, read_bin_header, bin_window
 
 # Full file
 data = bin2numpy("path.bin", ch1=0, ch2=None)  # (channels, samples)
@@ -190,13 +228,12 @@ data = bin2numpy("path.bin", ch1=0, ch2=None)  # (channels, samples)
 header, sampling_times, channels_num, sampling_rate, endian = read_bin_header("path.bin")
 
 # Windowed (for large files)
-from utils.bin_reader import bin_window
 window = bin_window("path.bin", sample_start=1000, sample_end=2000, ch1=0, ch2=100)
 ```
 
 ### Working with Filter Pipeline
 ```python
-from utils.classes.filter_pipeline import FilterStep, FilterPipeline
+from core.filter.filter_pipeline import FilterStep, FilterPipeline, replay_filter_pipeline
 
 # Create step
 step = FilterStep(
@@ -209,13 +246,13 @@ step = FilterStep(
 )
 
 # Replay pipeline
-from utils.classes.filter_pipeline import replay_filter_pipeline
-result = replay_filter_pipeline(raw_data, steps, sampling_rate, algorithm_registry)
+from core.filter.das_filter import apply_das_filter
+result = replay_filter_pipeline(raw_data, steps, sampling_rate, apply_das_filter)
 ```
 
 ### DASPy Export
 ```python
-from utils.classes.daspy_conversion import convert_bin_to_daspy, read_bin_metadata
+from core.export.daspy_conversion import convert_bin_to_daspy, read_bin_metadata
 
 metadata = read_bin_metadata("input.bin")
 convert_bin_to_daspy(

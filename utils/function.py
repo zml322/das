@@ -1,15 +1,15 @@
 # -*- coding: utf-8 -*-
 """
-@Time    : 2024/6/12 上午9:27
-@Author  : zxy
-@File    : function.py
+通用工具函数模块
+
+包含资源路径、绘图辅助、数据处理等通用函数
 """
 import base64
 import os
 import sys
 import tempfile
 from pathlib import Path
-from typing import Union, Optional
+from typing import Union, Optional, TYPE_CHECKING
 
 import numpy as np
 import soundfile
@@ -17,7 +17,9 @@ from PyQt5.QtGui import QIcon, QColor
 from PyQt5.QtWidgets import QMessageBox, QWidget, QVBoxLayout
 from scipy.signal import detrend
 
-from utils.widget import MyPlotWidget
+# 延迟导入避免循环依赖
+if TYPE_CHECKING:
+    from ui.widgets.custom_widgets import MyPlotWidget
 
 DAS_FILE_FILTER = 'DAS data (*.dat *.bin)'
 DAS_FILE_SUFFIXES = ('.dat', '.bin')
@@ -193,6 +195,8 @@ def initCombinedPlotWidget(data: np.array,
     Returns: 生成的组合组件
 
     """
+    from ui.widgets.custom_widgets import MyPlotWidget  # 延迟导入避免循环依赖
+
     x = xAxis(num, begin, end, sampling_rate)
     data_widget = MyPlotWidget(f'{title}', '时间（s）', '相位差（rad）', grid=True)
     data_widget.draw(x, data, pen=QColor('blue'))
