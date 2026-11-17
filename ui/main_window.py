@@ -4779,6 +4779,9 @@ class MainWindow(QMainWindow):
         ) else None
         if canvas is not None:
             canvas.clear_rendered()
+        # 暂停绘制，避免 clear() 和重新添加 Item 之间出现空白帧（闪烁）
+        updates_disabled = not plot_widget.updatesEnabled()
+        plot_widget.setUpdatesEnabled(False)
         plot_widget.clear()
         self._video_annotation_items = []
         self.video_playhead_line = None
@@ -4794,6 +4797,8 @@ class MainWindow(QMainWindow):
                 canvas.bounds = None
             self.video_current_das_label.setText('DAS：请先匹配数据')
             self.video_sequence_status_label.setText('匹配 DAS：未加载')
+            if not updates_disabled:
+                plot_widget.setUpdatesEnabled(True)
             return
 
         channel_from, channel_to = self._videoChannelBounds()
@@ -4948,6 +4953,8 @@ class MainWindow(QMainWindow):
                 for line in (self.video_playhead_line, self.video_camera_line):
                     if line is not None:
                         line.setMovable(False)
+        # 恢复绘制，所有 Item 一次性渲染到屏幕，消除重建过程中的白帧
+        plot_widget.setUpdatesEnabled(True)
 
     def _drawVideoCameraLine(self):
         if not self.video_annotation_project.camera_visible:
