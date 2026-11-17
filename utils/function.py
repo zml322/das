@@ -12,7 +12,6 @@ from pathlib import Path
 from typing import Union, Optional
 
 import numpy as np
-import soundfile
 from PyQt5.QtGui import QIcon
 from PyQt5.QtWidgets import QMessageBox, QWidget
 
@@ -102,22 +101,6 @@ def setPicture(widget: QWidget, picture_code: str, picture_name: str, window_ico
     finally:
         if os.path.exists(temporary_picture):
             os.remove(temporary_picture)  # 移除临时图片
-
-
-def writeWav(path: str, data: np.array, sr: int) -> None:
-    """
-    创建 temp.wav 文件
-    Args:
-        path: 创建路径
-        data: 要写入的数据
-        sr: 数据的采样率
-
-    Returns:
-
-    """
-    soundfile.write(os.path.join(path, 'temp.wav'), data, sr)
-
-
 
 
 def toAmplitude(data: np.array) -> np.array:

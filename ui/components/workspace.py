@@ -28,7 +28,7 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
-from image.image import folder_jpg, play_jpg, stop_jpg
+from image.image import folder_jpg
 from ui.components.window_feature import WindowFeature
 from ui.widgets.custom_widgets import (
     ComboBox,
@@ -210,29 +210,11 @@ class WorkspaceController(WindowFeature):
         self.window.controls.channel_number_spinbx.valueChanged.connect(self.window.plots.plotSingleChannelTime)
         self.window.controls.channel_number_spinbx.valueChanged.connect(self.window.plots.plotAmplitudeFrequency)
 
-        # 播放音频按钮
-        self.window.plots.player_play_button = PushButton()
-        setPicture(self.window.plots.player_play_button, play_jpg, "play.jpg")
-        self.window.plots.player_play_button.clicked.connect(self.window.plots.createWavFile)
-        self.window.plots.player_play_button.clicked.connect(self.window.plots.createPlayer)
-        self.window.plots.player_play_button.clicked.connect(self.window.plots.playBtnChangeState)
-
-        # 停止音频播放按钮
-        self.window.plots.player_stop_button = PushButton()
-        setPicture(self.window.plots.player_stop_button, stop_jpg, "stop.jpg")
-        self.window.plots.player_stop_button.clicked.connect(self.window.plots.resetPlayer)
-
-        self.window.plots.player_play_button.setDisabled(True)
-        self.window.plots.player_stop_button.setDisabled(True)  # 默认不可选中
-
         channel_controls_hbox = QHBoxLayout()
         channel_controls_hbox.setContentsMargins(0, 0, 0, 0)
         channel_controls_hbox.setSpacing(6)
         channel_controls_hbox.addWidget(channel_number_label)
         channel_controls_hbox.addWidget(self.window.controls.channel_number_spinbx)
-        channel_controls_hbox.addSpacing(10)
-        channel_controls_hbox.addWidget(self.window.plots.player_play_button)
-        channel_controls_hbox.addWidget(self.window.plots.player_stop_button)
         channel_controls_hbox.addStretch(1)
 
         # 灰度图显示控制只在灰度图页面显示。

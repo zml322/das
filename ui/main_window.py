@@ -53,7 +53,6 @@ class MainWindow(QMainWindow):
         QApplication.instance().aboutToQuit.connect(self.shutdown)
 
     def initLocalParams(self):
-        self.plots.resetAudio()
         self.data.resetRange()
         self.overlays.resetRange()
         self.waves.resetView()

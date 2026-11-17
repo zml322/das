@@ -1,27 +1,23 @@
-"""DAS images, single-channel plots and audio playback."""
-
-import os.path
+"""DAS images and single-channel plots."""
 
 import numpy as np
 import pyqtgraph as pg
 from matplotlib import pyplot as plt
-from PyQt5 import QtMultimedia
-from PyQt5.QtCore import QRectF, QUrl
+from PyQt5.QtCore import QRectF
 from PyQt5.QtGui import QColor
 from scipy.integrate import cumulative_trapezoid
 
 from core.analysis.binary_image import BinaryImageHandler
-from image.image import pause_jpg, play_jpg
 from ui.components.window_feature import WindowFeature
 from ui.widgets.custom_widgets import Action, Menu, MyPlotWidget
-from utils.function import printError, setPicture, toAmplitude, writeWav, xAxis
+from utils.function import printError, toAmplitude, xAxis
 from utils.theme import ui_font_family
 
 IMAGE_LEVEL_SAMPLE_LIMIT = 2_000_000
 
 
 class DataPlotsController(WindowFeature):
-    """DAS images, single-channel plots and audio playback."""
+    """DAS images and single-channel plots."""
 
     def __init__(self, window):
         super().__init__(window)
@@ -55,60 +51,6 @@ class DataPlotsController(WindowFeature):
         pg.setConfigOptions(leftButtonPan=True)
         pg.setConfigOption("background", "w")
         pg.setConfigOption("foreground", "k")
-
-    def resetAudio(self):
-        self.player = None
-        self.playerState = False
-        self.hasWavFile = False
-
-    def playBtnChangeState(self):
-        """点击播放按钮改变文字和播放器状态"""
-        if not self.playerState:
-            setPicture(self.player_play_button, pause_jpg, "pause.jpg")
-            self.player.play()
-            self.playerState = True
-        else:
-            setPicture(self.player_play_button, play_jpg, "play.jpg")
-            self.player.pause()
-            self.playerState = False
-
-    def createWavFile(self):
-        """创建当前数据的 wav 文件，储存在当前文件夹路径下"""
-        if not self.hasWavFile:
-            data = np.array(
-                self.window.data.visible_data[self.window.controls.channel_number - 1]
-            )  # 不转array会在重复转换数据类型时发生数据类型错误
-            writeWav(self.window.data.file_path, data, self.window.data.sampling_rate)
-            self.hasWavFile = True
-
-    def createPlayer(self):
-        """创建播放器并赋数据"""
-        if not self.player:
-            self.player = QtMultimedia.QMediaPlayer()
-            self.player.stateChanged.connect(self.playerStateChanged)
-            self.player.setMedia(
-                QtMultimedia.QMediaContent(QUrl.fromLocalFile(os.path.join(self.window.data.file_path, "temp.wav")))
-            )
-
-    def playerStateChanged(self, state: QtMultimedia.QMediaPlayer.State):
-        """
-        播放器停止后删除文件
-        Args:
-            state: 播放器状态
-
-        Returns:
-
-        """
-        if state == QtMultimedia.QMediaPlayer.StoppedState:
-            self.resetPlayer()
-            os.remove(os.path.join(self.window.data.file_path, "temp.wav"))  # 在播放完成或点击Abort后删除临时文件
-
-    def resetPlayer(self):
-        """重置播放器"""
-        self.player.stop()
-        setPicture(self.player_play_button, play_jpg, "play.jpg")
-        self.playerState = False
-        self.hasWavFile = False
 
     def plotGrayScaleImage(self):
         """绘制灰度图"""

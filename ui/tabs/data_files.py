@@ -18,7 +18,6 @@ from core.data.data_timeline import DataTimeline, format_wall_time
 from core.filter.filter_pipeline import clone_steps
 from image.image import play_jpg
 from ui.components.window_feature import WindowFeature
-from ui.dialogs.data_sifting import DataSifting
 from ui.widgets.custom_widgets import Action, Dialog, Menu, TextEdit
 from utils.function import DAS_FILE_FILTER, DAS_FILE_SUFFIXES, printError, setPicture
 
@@ -33,7 +32,6 @@ class DataFilesController(WindowFeature):
         self.data_group = None
         self.data_timeline = None
         self._source_time_headers = []
-        self.data_sift = None
         self.file_path = ""
 
     def createMenu(self):
@@ -331,9 +329,3 @@ class DataFilesController(WindowFeature):
 
         dialog.setLayout(vbox)
         dialog.exec_()
-
-    def dataSiftingDialog(self):
-        """信号检测"""
-        if not self.data_sift:
-            self.data_sift = DataSifting(self.window)
-        self.data_sift.runDialog()
