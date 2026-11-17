@@ -1,0 +1,396 @@
+{
+  "results": [
+    {
+      "width": 2444,
+      "height": 1377,
+      "layout": {
+        ".platform-header": {
+          "x": 0,
+          "y": 0,
+          "width": 2444,
+          "height": 88
+        },
+        ".overview-strip": {
+          "x": 14,
+          "y": 106,
+          "width": 2416,
+          "height": 116
+        },
+        ".dashboard-workspace": {
+          "x": 14,
+          "y": 240,
+          "width": 2416,
+          "height": 847
+        },
+        ".resource-panel": {
+          "x": 14,
+          "y": 240,
+          "width": 410,
+          "height": 315.015625
+        },
+        ".live-event-panel": {
+          "x": 14,
+          "y": 573.015625,
+          "width": 410,
+          "height": 513.984375
+        },
+        ".layer-panel": {
+          "x": 2086,
+          "y": 240,
+          "width": 344,
+          "height": 439.359375
+        },
+        ".scene-status": {
+          "x": 2086,
+          "y": 697.359375,
+          "width": 344,
+          "height": 389.625
+        },
+        ".telemetry-dock": {
+          "x": 14,
+          "y": 1105,
+          "width": 2416,
+          "height": 244
+        }
+      },
+      "outside": [],
+      "clippedTitles": [],
+      "metricLeaks": [],
+      "scrolls": {
+        ".resource-content": {
+          "client": 245,
+          "scroll": 245
+        },
+        ".event-cards": {
+          "client": 390,
+          "scroll": 390
+        },
+        ".scene-status": {
+          "client": 388,
+          "scroll": 388
+        },
+        ".telemetry-dock": {
+          "client": 242,
+          "scroll": 242
+        }
+      },
+      "cardOverlaps": [],
+      "documentOverflow": false
+    },
+    {
+      "width": 1920,
+      "height": 1080,
+      "layout": {
+        ".platform-header": {
+          "x": 0,
+          "y": 0,
+          "width": 1920,
+          "height": 69.125
+        },
+        ".overview-strip": {
+          "x": 10.984375,
+          "y": 83.265625,
+          "width": 1898.03125,
+          "height": 91.125
+        },
+        ".dashboard-workspace": {
+          "x": 10.984375,
+          "y": 188.53125,
+          "width": 1898.03125,
+          "height": 663.671875
+        },
+        ".resource-panel": {
+          "x": 10.984375,
+          "y": 188.53125,
+          "width": 322.09375,
+          "height": 246.8125
+        },
+        ".live-event-panel": {
+          "x": 10.984375,
+          "y": 449.484375,
+          "width": 322.09375,
+          "height": 402.71875
+        },
+        ".layer-panel": {
+          "x": 1638.78125,
+          "y": 188.53125,
+          "width": 270.234375,
+          "height": 344.25
+        },
+        ".scene-status": {
+          "x": 1638.78125,
+          "y": 546.921875,
+          "width": 270.234375,
+          "height": 305.28125
+        },
+        ".telemetry-dock": {
+          "x": 10.984375,
+          "y": 866.34375,
+          "width": 1898.03125,
+          "height": 191.671875
+        }
+      },
+      "outside": [],
+      "clippedTitles": [],
+      "metricLeaks": [],
+      "scrolls": {
+        ".resource-content": {
+          "client": 191,
+          "scroll": 191
+        },
+        ".event-cards": {
+          "client": 305,
+          "scroll": 305
+        },
+        ".scene-status": {
+          "client": 303,
+          "scroll": 303
+        },
+        ".telemetry-dock": {
+          "client": 190,
+          "scroll": 190
+        }
+      },
+      "cardOverlaps": [],
+      "documentOverflow": false
+    },
+    {
+      "width": 1600,
+      "height": 900,
+      "layout": {
+        ".platform-header": {
+          "x": 0,
+          "y": 0,
+          "width": 1600,
+          "height": 57.609375
+        },
+        ".overview-strip": {
+          "x": 9.15625,
+          "y": 69.390625,
+          "width": 1581.6875,
+          "height": 75.9375
+        },
+        ".dashboard-workspace": {
+          "x": 9.15625,
+          "y": 157.109375,
+          "width": 1581.6875,
+          "height": 553.046875
+        },
+        ".resource-panel": {
+          "x": 9.15625,
+          "y": 157.109375,
+          "width": 268.40625,
+          "height": 205.671875
+        },
+        ".live-event-panel": {
+          "x": 9.15625,
+          "y": 374.5625,
+          "width": 268.40625,
+          "height": 335.59375
+        },
+        ".layer-panel": {
+          "x": 1365.640625,
+          "y": 157.109375,
+          "width": 225.203125,
+          "height": 286.859375
+        },
+        ".scene-status": {
+          "x": 1365.640625,
+          "y": 455.75,
+          "width": 225.203125,
+          "height": 254.390625
+        },
+        ".telemetry-dock": {
+          "x": 9.15625,
+          "y": 721.9375,
+          "width": 1581.6875,
+          "height": 159.734375
+        }
+      },
+      "outside": [],
+      "clippedTitles": [],
+      "metricLeaks": [],
+      "scrolls": {
+        ".resource-content": {
+          "client": 159,
+          "scroll": 159
+        },
+        ".event-cards": {
+          "client": 254,
+          "scroll": 254
+        },
+        ".scene-status": {
+          "client": 252,
+          "scroll": 252
+        },
+        ".telemetry-dock": {
+          "client": 158,
+          "scroll": 158
+        }
+      },
+      "cardOverlaps": [],
+      "documentOverflow": false
+    },
+    {
+      "width": 1280,
+      "height": 720,
+      "layout": {
+        ".platform-header": {
+          "x": 0,
+          "y": 0,
+          "width": 1280,
+          "height": 46.078125
+        },
+        ".overview-strip": {
+          "x": 7.328125,
+          "y": 55.5,
+          "width": 1265.34375,
+          "height": 60.75
+        },
+        ".dashboard-workspace": {
+          "x": 7.328125,
+          "y": 125.671875,
+          "width": 1265.34375,
+          "height": 442.46875
+        },
+        ".resource-panel": {
+          "x": 7.328125,
+          "y": 125.671875,
+          "width": 214.71875,
+          "height": 164.546875
+        },
+        ".live-event-panel": {
+          "x": 7.328125,
+          "y": 299.640625,
+          "width": 214.71875,
+          "height": 268.5
+        },
+        ".layer-panel": {
+          "x": 1092.515625,
+          "y": 125.671875,
+          "width": 180.15625,
+          "height": 229.5
+        },
+        ".scene-status": {
+          "x": 1092.515625,
+          "y": 364.59375,
+          "width": 180.15625,
+          "height": 203.53125
+        },
+        ".telemetry-dock": {
+          "x": 7.328125,
+          "y": 577.5625,
+          "width": 1265.34375,
+          "height": 127.78125
+        }
+      },
+      "outside": [],
+      "clippedTitles": [],
+      "metricLeaks": [],
+      "scrolls": {
+        ".resource-content": {
+          "client": 127,
+          "scroll": 127
+        },
+        ".event-cards": {
+          "client": 203,
+          "scroll": 203
+        },
+        ".scene-status": {
+          "client": 202,
+          "scroll": 202
+        },
+        ".telemetry-dock": {
+          "client": 126,
+          "scroll": 126
+        }
+      },
+      "cardOverlaps": [],
+      "documentOverflow": false
+    },
+    {
+      "width": 1600,
+      "height": 952,
+      "layout": {
+        ".platform-header": {
+          "x": 0,
+          "y": 0,
+          "width": 1600,
+          "height": 57.609375
+        },
+        ".overview-strip": {
+          "x": 9.15625,
+          "y": 69.390625,
+          "width": 1581.6875,
+          "height": 75.9375
+        },
+        ".dashboard-workspace": {
+          "x": 9.15625,
+          "y": 157.109375,
+          "width": 1581.6875,
+          "height": 605.046875
+        },
+        ".resource-panel": {
+          "x": 9.15625,
+          "y": 157.109375,
+          "width": 268.40625,
+          "height": 225.4375
+        },
+        ".live-event-panel": {
+          "x": 9.15625,
+          "y": 394.328125,
+          "width": 268.40625,
+          "height": 367.828125
+        },
+        ".layer-panel": {
+          "x": 1365.640625,
+          "y": 157.109375,
+          "width": 225.203125,
+          "height": 314.421875
+        },
+        ".scene-status": {
+          "x": 1365.640625,
+          "y": 483.3125,
+          "width": 225.203125,
+          "height": 278.828125
+        },
+        ".telemetry-dock": {
+          "x": 9.15625,
+          "y": 773.9375,
+          "width": 1581.6875,
+          "height": 159.734375
+        }
+      },
+      "outside": [],
+      "clippedTitles": [],
+      "metricLeaks": [],
+      "scrolls": {
+        ".resource-content": {
+          "client": 179,
+          "scroll": 179
+        },
+        ".event-cards": {
+          "client": 286,
+          "scroll": 286
+        },
+        ".scene-status": {
+          "client": 277,
+          "scroll": 277
+        },
+        ".telemetry-dock": {
+          "client": 158,
+          "scroll": 158
+        }
+      },
+      "cardOverlaps": [],
+      "documentOverflow": false
+    }
+  ],
+  "errors": [],
+  "interactions": {
+    "deviceCount": 5,
+    "historyCount": 6,
+    "fiberCount": 4,
+    "opacityOutput": "60%"
+  }
+}

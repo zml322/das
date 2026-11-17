@@ -1,0 +1,28 @@
+{
+  "name": "fiber-monitoring-frontend",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "build:check": "vue-tsc && vite build",
+    "test:scene": "node tests/visual-effects.mjs && node tests/engineering-scene.mjs && node tests/vehicle-assets.mjs",
+    "test:charts": "node tests/chart-series.mjs",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "gsap": "^3.15.1",
+    "pinia": "^2.1.0",
+    "three": "^0.160.0",
+    "vue": "^3.4.0",
+    "vue-router": "^4.2.0"
+  },
+  "devDependencies": {
+    "@types/three": "0.160.0",
+    "@vitejs/plugin-vue": "^5.0.0",
+    "typescript": "^5.3.0",
+    "vite": "^5.0.0",
+    "vue-tsc": "2.2.12"
+  }
+}

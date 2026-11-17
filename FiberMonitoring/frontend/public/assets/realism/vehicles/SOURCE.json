@@ -1,0 +1,42 @@
+{
+  "provider": "Innerscene original models",
+  "licenseTerms": "https://www.innerscene.com/tools/library/terms",
+  "files": [
+    {
+      "path": "sedan.glb",
+      "source": "https://www.innerscene.com/tools/library/3d-parts/graphite-four-door-sedan-eed96d12",
+      "downloadUrl": "https://files.innerscene.com/library/graphite-four-door-sedan-eed96d12/66f81bc09e7e30a86a06/graphite-four-door-sedan.glb",
+      "license": "CC0-1.0",
+      "sha256": "e0bea6e5a73819e0b53bb78e2d6f764b91b8edfa44772a8e8fc2ae0372e08c4d",
+      "bytes": 2784204,
+      "originalSha256": "736f2fb92e8606db76714344d0c732ce1d033b74d9822b95da89c41e1c006308",
+      "triangles": 56964,
+      "originalTriangles": 132082,
+      "meshes": 10
+    },
+    {
+      "path": "bus.glb",
+      "source": "https://www.innerscene.com/tools/library/3d-parts/midi-bus-10-5-m-b18bf6f2",
+      "downloadUrl": "https://files.innerscene.com/library/midi-bus-10-5-m-b18bf6f2/45ee90be7716c9c6b727/midi-bus-10-5-m.glb",
+      "license": "CC0-1.0",
+      "sha256": "f1a18586334faa862665de4cc833d2a970471df3f4ae98a67c20b747a91d6941",
+      "bytes": 264080,
+      "originalSha256": "501e524a40a7b1100f154996196b09763a02c53e1ceac71bdc5a40a5a383af7f",
+      "triangles": 6720,
+      "originalTriangles": 6720,
+      "meshes": 12
+    },
+    {
+      "path": "truck.glb",
+      "source": "https://www.innerscene.com/tools/library/3d-parts/7-5-t-class-box-truck-with-roll-up-door-12baea66",
+      "downloadUrl": "https://files.innerscene.com/library/7-5-t-class-box-truck-with-roll-up-door-12baea66/286c7a3a7174b81d13ed/7-5-t-class-box-truck-with-roll-up-door.glb",
+      "license": "CC0-1.0",
+      "sha256": "1b9d855ce8a5d207794f4cde1aacc84c351898c22a7d407b1092e04ac6ba3b7e",
+      "bytes": 3475500,
+      "originalSha256": "6b983b515ee6bf044489a88cccab0ba4cbdb8d9b873b0c023098f9ecd15f4115",
+      "triangles": 68832,
+      "originalTriangles": 157848,
+      "meshes": 10
+    }
+  ]
+}

@@ -103,5 +103,9 @@ class FfmpegFrameWorker(QThread):
                     process.wait(timeout=2)
                 except (OSError, subprocess.SubprocessError):
                     pass
+            if process.stdout is not None:
+                process.stdout.close()
+            if process.stderr is not None:
+                process.stderr.close()
             if not self._stop.is_set():
                 self.playbackEnded.emit()

@@ -12,5 +12,6 @@ dist/
 *.spec
 *.cfg
 test*.py
+!tests/test_*.py
 Record.py
 /下午/

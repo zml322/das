@@ -5,7 +5,4 @@ numpy
 scipy
 pyqtgraph
 matplotlib
-pandas
-EMD-signal
-PyWavelets
 DASPy-toolbox>=1.2.7

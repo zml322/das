@@ -1,0 +1,222 @@
+.scene-viewport {
+  position: relative;
+  overflow: hidden;
+  border-radius: 12px;
+  border: 1px solid #23628a;
+  background: #7fb2d7;
+  min-width: 0;
+  min-height: 0;
+  contain: layout paint;
+}
+.three-surface {
+  position: absolute;
+  inset: 0;
+}
+.three-surface canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+.scene-view-tabs {
+  position: absolute;
+  top: 14px;
+  left: 14px;
+  display: flex;
+  background: #041a34da;
+  border: 1px solid #377ca799;
+  border-radius: 7px;
+  overflow: hidden;
+  z-index: 3;
+}
+.scene-view-tabs button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 11px 16px;
+  border-right: 1px solid #39618588;
+  color: #c9dfef;
+  font-size: 13px;
+}
+.scene-view-tabs button.active {
+  background: linear-gradient(145deg, #0b9adc, #084b81);
+  box-shadow: inset 0 -2px 0 #55e2ff;
+  color: white;
+}
+.scene-indicators {
+  position: absolute;
+  top: 73px;
+  left: 18px;
+  display: flex;
+  gap: 12px;
+  font-size: 10px;
+  color: #e5f9ff;
+  text-shadow: 0 1px 5px #153656;
+}
+.scene-indicators i {
+  height: 5px;
+  width: 5px;
+  margin-right: 6px;
+}
+.scene-caption {
+  position: absolute;
+  right: 16px;
+  top: 18px;
+  text-align: right;
+  pointer-events: none;
+  color: white;
+  text-shadow: 0 1px 5px #173e63;
+}
+.scene-caption span {
+  font-size: 11px;
+}
+.scene-caption small {
+  display: block;
+  font-size: 9px;
+  opacity: 0.8;
+  margin-top: 5px;
+}
+.scene-playback {
+  position: absolute;
+  bottom: 14px;
+  left: 16px;
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  background: #031a32df;
+  border: 1px solid #25658b;
+  border-radius: 6px;
+  padding: 6px 10px;
+  color: #9bd0ed;
+  font-size: 11px;
+  z-index: 3;
+}
+.scene-playback button {
+  padding: 3px;
+  min-height: 24px;
+}
+.scene-playback > span {
+  padding-right: 12px;
+  border-right: 1px solid #25506d;
+}
+.scene-error {
+  position: absolute;
+  inset: 40% 15%;
+  background: #271c35ed;
+  padding: 20px;
+  color: #ff9fae;
+  border-radius: 8px;
+}
+.scene-selection {
+  max-width: 320px;
+  max-height: 260px;
+  overflow: auto;
+  position: absolute;
+  bottom: 55px;
+  right: 15px;
+  min-width: 200px;
+  background: #031a34ec;
+  border: 1px solid #3183b5;
+  padding: 15px;
+  border-radius: 8px;
+  z-index: 4;
+}
+.scene-selection > button {
+  float: right;
+}
+.scene-selection small {
+  display: block;
+  font-size: 10px;
+  color: #8ec3dd;
+  margin-top: 8px;
+}
+.scene-annotations {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  overflow: hidden;
+  z-index: 2;
+}
+.scene-annotation-leaders {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+  pointer-events: none;
+}
+.scene-annotation {
+  position: absolute;
+  left: 0;
+  top: 0;
+  white-space: nowrap;
+  padding: calc(7 * var(--ui-unit)) calc(12 * var(--ui-unit));
+  background: #03263be8;
+  border: 1px solid #38bce9;
+  border-radius: 5px;
+  color: #b8f0ff;
+  font-size: max(11px, calc(22 * var(--ui-unit)));
+  box-shadow: 0 0 10px #16a1e133;
+}
+.scene-annotation:after {
+  display: none;
+  content: "";
+  position: absolute;
+  bottom: -13px;
+  left: 12px;
+  height: 12px;
+  width: 1px;
+  background: currentColor;
+}
+.scene-annotation.red {
+  background: #501a23e8;
+  color: #ffb3b7;
+  border-color: #ff5c64;
+  box-shadow: 0 0 12px #ff454940;
+}
+.scene-annotation.amber {
+  background: #49300ce8;
+  color: #ffe0a2;
+  border-color: #ffae32;
+}
+.scene-annotation.purple {
+  background: #2d1546e8;
+  color: #e5baff;
+  border-color: #c46bff;
+}
+.scene-notice {
+  position: absolute;
+  left: 15px;
+  bottom: 60px;
+  max-width: 80%;
+  padding: 10px 14px;
+  border: 1px solid #479cc5;
+  border-radius: 6px;
+  background: #09233fee;
+  color: #bfe8ff;
+  font-size: 11px;
+  z-index: 4;
+}
+.scene-notice button {
+  margin-left: 12px;
+  padding: 3px;
+}
+.scene-annotation.green {
+  background: #063c2be8;
+  color: #a1f7c8;
+  border-color: #34ed91;
+}
+.scene-annotation.soil {
+  background: #112331e8;
+  color: #d4e5ed;
+  border-color: #5c8fad;
+  font-size: max(11px, calc(21 * var(--ui-unit)));
+  padding: calc(6 * var(--ui-unit)) calc(10 * var(--ui-unit));
+}
+.scene-annotation.soil:after {
+  left: auto;
+  right: -14px;
+  top: 50%;
+  width: 13px;
+  height: 1px;
+}

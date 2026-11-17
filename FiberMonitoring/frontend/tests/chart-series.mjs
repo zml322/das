@@ -1,0 +1,20 @@
+import assert from 'node:assert/strict';
+import ts from 'typescript';
+import { readFile } from 'node:fs/promises';
+
+const source = await readFile(new URL('../src/utils/chartSeries.ts', import.meta.url), 'utf8');
+const compiled = ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2020, module: ts.ModuleKind.ESNext } }).outputText;
+const { waveformWindow, chartMaximum } = await import('data:text/javascript;base64,' + Buffer.from(compiled).toString('base64'));
+const sine = Array.from({ length: 10000 }, (_, i) => Math.sin(2 * Math.PI * 5 * i / 1000) * 100);
+const wave = waveformWindow(sine, 1000);
+assert.ok(wave.points.length <= 320);
+assert.equal(wave.count, 1200);
+assert.equal(wave.duration, 1.199);
+assert.ok(Math.max(...wave.points.map(p => p.value)) > 99, 'downsampling must retain positive peaks');
+assert.ok(Math.min(...wave.points.map(p => p.value)) < -99, 'downsampling must retain negative peaks');
+assert.ok(wave.points.every((p, i) => !i || p.index > wave.points[i - 1].index));
+assert.deepEqual(waveformWindow([], 1000), { points: [], count: 0, duration: 0 });
+assert.deepEqual(waveformWindow([3, -8], 0).points.map(p => p.value), [3, -8]);
+assert.ok(chartMaximum([-109, 80]) >= 109, 'axis must contain both signed extremes');
+assert.equal(chartMaximum([]), 1);
+console.log('PASS: waveform peak preservation, point budget, time axis, empty data, signed scale');

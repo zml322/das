@@ -1,0 +1,62 @@
+﻿[
+    {
+        "url":  "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/1k/asphalt_02/asphalt_02_diff_1k.jpg",
+        "path":  "asphalt-color.jpg",
+        "md5":  "fa19772d4817754c3efab708c651f5a8"
+    },
+    {
+        "url":  "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/1k/asphalt_02/asphalt_02_nor_gl_1k.jpg",
+        "path":  "asphalt-normal.jpg",
+        "md5":  "338da8de636ea36133170578cac82e8e"
+    },
+    {
+        "url":  "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/1k/asphalt_02/asphalt_02_rough_1k.jpg",
+        "path":  "asphalt-roughness.jpg",
+        "md5":  "ec80a2929797c1b3ffc121c4f665585a"
+    },
+    {
+        "url":  "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/1k/brown_mud_02/brown_mud_02_diff_1k.jpg",
+        "path":  "soil-color.jpg",
+        "md5":  "c3842f023e11a08c8cf521c947ce08c8"
+    },
+    {
+        "url":  "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/1k/brown_mud_02/brown_mud_02_nor_gl_1k.jpg",
+        "path":  "soil-normal.jpg",
+        "md5":  "880720109b4fe95652137b2243e41ca4"
+    },
+    {
+        "url":  "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/1k/brown_mud_02/brown_mud_02_rough_1k.jpg",
+        "path":  "soil-roughness.jpg",
+        "md5":  "a9d397c45a366da1c62d78ca72340ab0"
+    },
+    {
+        "url":  "https://dl.polyhaven.org/file/ph-assets/HDRIs/hdr/1k/kloppenheim_06_puresky_1k.hdr",
+        "path":  "daylight.hdr",
+        "md5":  "995d68b1656f26452572645c0ffe898b"
+    },
+    {
+        "url":  "https://dl.polyhaven.org/file/ph-assets/Models/gltf/1k/shrub_03/shrub_03_1k.gltf",
+        "path":  "foliage/shrub.gltf",
+        "md5":  "2c1ef10ff17e23f81d29c851d1409c9a"
+    },
+    {
+        "url":  "https://dl.polyhaven.org/file/ph-assets/Models/gltf/4k/shrub_03/shrub_03.bin",
+        "path":  "foliage/shrub_03.bin",
+        "md5":  "c26c6ed23b0034664eab5a0e3ee00f6a"
+    },
+    {
+        "url":  "https://dl.polyhaven.org/file/ph-assets/Models/jpg/1k/shrub_03/shrub_03_arm_1k.jpg",
+        "path":  "foliage/textures/shrub_03_arm_1k.jpg",
+        "md5":  "67faf4c5c213589b41a3bd18d378fa7d"
+    },
+    {
+        "url":  "https://dl.polyhaven.org/file/ph-assets/Models/jpg/1k/shrub_03/shrub_03_diff_1k.jpg",
+        "path":  "foliage/textures/shrub_03_diff_1k.jpg",
+        "md5":  "5da9190b7c2837a9e209a3fe774dba3c"
+    },
+    {
+        "url":  "https://dl.polyhaven.org/file/ph-assets/Models/jpg/1k/shrub_03/shrub_03_nor_gl_1k.jpg",
+        "path":  "foliage/textures/shrub_03_nor_gl_1k.jpg",
+        "md5":  "38956b2171644cfefda2ef542e055100"
+    }
+]

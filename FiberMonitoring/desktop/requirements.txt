@@ -1,0 +1,2 @@
+# PySide6 已包含 Qt WebEngine 与 WebChannel。
+PySide6>=6.8.0

@@ -37,7 +37,7 @@ class ReviewDialog(QDialog):
         self.algorithm = QComboBox()
         self.algorithm.addItem('das_veh 原版卡尔曼 · 原始采样率', 'das_veh')
         self.algorithm.addItem('已有片段连接 · 原始采样率', 'beam')
-        group, _timeline = controller.window._videoDataContext()
+        group, _timeline = controller.window.sync._videoDataContext()
         count = group.channel_count if group is not None else 520
         self.channel_from = QSpinBox()
         self.channel_to = QSpinBox()
@@ -192,7 +192,7 @@ class ReviewDialog(QDialog):
                 'seed_sigma': self.seed_sigma.value(), 'sigma_a': self.sigma_a.value(),
                 'polarity': self.polarity.currentData(),
                 'direction': self.direction.currentData(),
-                'channel_spacing': self.controller.window.video_trajectory_dx_spin_box.value()}
+                'channel_spacing': self.controller.window.video_analysis.video_trajectory_dx_spin_box.value()}
 
     def selected_id(self):
         row = self.table.currentRow()
@@ -245,8 +245,8 @@ class TrajectoryPrescreenController(QObject):
         self.dialog.activateWindow()
 
     def current_context(self):
-        group, timeline = self.window._videoDataContext()
-        return group, timeline, self.window.video_annotation_project
+        group, timeline = self.window.sync._videoDataContext()
+        return group, timeline, self.window.annotations.video_annotation_project
 
     def context_matches(self, context):
         return context is not None and all(a is b for a, b in zip(context, self.current_context()))
@@ -274,15 +274,15 @@ class TrajectoryPrescreenController(QObject):
         if self.dialog is None:
             self.show()
         w = self.window
-        group, timeline = w._videoDataContext()
-        if group is None or w._annotationTimeline() is None:
+        group, timeline = w.sync._videoDataContext()
+        if group is None or w.sync._annotationTimeline() is None:
             self.dialog.status.setText('请先导入与标注工程匹配的 DAS 数据')
             return
-        x_range, y_range = w.video_das_plot_widget.getViewBox().viewRange()
+        x_range, y_range = w.video_plot.video_das_plot_widget.getViewBox().viewRange()
         import math
         first = max(0, int(math.floor(x_range[0] * timeline.sampling_rate)))
         last = min(group.total_samples, int(math.ceil(x_range[1] * timeline.sampling_rate)))
-        origin = getattr(w, '_video_plot_channel_from', 1)
+        origin = getattr(w.video_plot, '_video_plot_channel_from', 1)
         ch_first = max(1, int(math.floor(y_range[0])) + origin)
         ch_last = min(group.channel_count, int(math.ceil(y_range[1])) + origin - 1)
         parameters = self.dialog.parameters()
@@ -291,10 +291,10 @@ class TrajectoryPrescreenController(QObject):
         if not 1 <= ch_first <= ch_last <= group.channel_count or ch_last - ch_first + 1 < 8:
             self.dialog.status.setText(f'请指定来源范围内至少 8 个通道（来源共 {group.channel_count} 通道）')
             return
-        w._pauseForAnnotationDrawing()
-        w.annotation_canvas.cancel()
+        w.annotations._pauseForAnnotationDrawing()
+        w.annotations.annotation_canvas.cancel()
         # Freeze the requested region for review instead of following playback.
-        w.video_follow_checkbox.setChecked(False)
+        w.video_plot.video_follow_checkbox.setChecked(False)
         self.invalidate()
         self.context = self.current_context()
         generation = self.generation
@@ -310,7 +310,7 @@ class TrajectoryPrescreenController(QObject):
         self.dialog.cancel.setEnabled(True)
         self.dialog.progress.setValue(0)
         self.dialog.status.setText('正在初筛；可取消。播放跟随已关闭，便于校对。')
-        raw_data = None if w.video_sequence_data_group is not None else getattr(w, 'raw_data', None)
+        raw_data = None if w.video_files.video_sequence_data_group is not None else getattr(w.data, 'raw_data', None)
         if self.executor is None:
             self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix='das-prescreen')
         context = self.context
@@ -320,7 +320,7 @@ class TrajectoryPrescreenController(QObject):
         self.future.prescreen_context = context
         self.future.prescreen_generation = generation
         self.future.prescreen_dx = parameters['channel_spacing']
-        w.plotVideoComparisonImage(preserve_view=True)
+        w.video_plot.plotVideoComparisonImage(preserve_view=True)
         self.timer.start()
 
     def poll(self):
@@ -352,7 +352,7 @@ class TrajectoryPrescreenController(QObject):
                 f'初筛完成：{len(result.proposals)} 条候选，用时 {time.perf_counter() - self.started_at:.1f} 秒。'
                 + '；'.join(result.notes))
             self.refresh()
-            self.window.plotVideoComparisonImage(preserve_view=True)
+            self.window.video_plot.plotVideoComparisonImage(preserve_view=True)
         except PrescreenCancelled:
             self.dialog.status.setText('检测已取消或来源已变化，未加入候选')
         except Exception as error:
@@ -385,31 +385,31 @@ class TrajectoryPrescreenController(QObject):
 
     def select(self, identifier):
         self.selected_id = identifier if identifier in self.candidates else None
-        self.window.plotVideoComparisonImage(preserve_view=True)
+        self.window.video_plot.plotVideoComparisonImage(preserve_view=True)
 
     def edit(self, identifier):
         if identifier not in self.candidates or not self.context_matches(self.context):
             return
         self.selected_id = identifier
-        self.window._pauseForAnnotationDrawing()
-        self.window.plotVideoComparisonImage(preserve_view=True)
-        self.window.annotation_canvas.start_edit(-identifier)
+        self.window.annotations._pauseForAnnotationDrawing()
+        self.window.video_plot.plotVideoComparisonImage(preserve_view=True)
+        self.window.annotations.annotation_canvas.start_edit(-identifier)
         self.window.activateWindow()
 
     def update_geometry(self, identifier, points):
         proposal = self.candidates.get(identifier)
         if proposal is None or not self.context_matches(self.context):
             return
-        proposal.vertices = self.window._geometryVerticesFromPlot(points)
+        proposal.vertices = self.window.annotations._geometryVerticesFromPlot(points)
         proposal.edited = True
         self.refresh()
-        self.window.plotVideoComparisonImage(preserve_view=True)
+        self.window.video_plot.plotVideoComparisonImage(preserve_view=True)
 
     def remove(self, identifier):
         self.remove_many([identifier])
 
     def remove_many(self, identifiers):
-        canvas = self.window.annotation_canvas
+        canvas = self.window.annotations.annotation_canvas
         if canvas._edit_id is not None and -canvas._edit_id in identifiers:
             canvas.cancel()
         for identifier in identifiers:
@@ -417,14 +417,14 @@ class TrajectoryPrescreenController(QObject):
         if self.selected_id not in self.candidates:
             self.selected_id = None
         self.refresh()
-        self.window.plotVideoComparisonImage(preserve_view=True)
+        self.window.video_plot.plotVideoComparisonImage(preserve_view=True)
 
     def accept(self, identifiers):
-        if not self.context_matches(self.context) or self.window._annotationTimeline() is None:
+        if not self.context_matches(self.context) or self.window.sync._annotationTimeline() is None:
             if self.dialog is not None:
                 self.dialog.status.setText('DAS 来源已变化，请重新初筛')
             return
-        canvas = self.window.annotation_canvas
+        canvas = self.window.annotations.annotation_canvas
         if canvas._edit_id is not None:
             canvas.commit_edit()
             if canvas._edit_id is not None:
@@ -433,36 +433,36 @@ class TrajectoryPrescreenController(QObject):
         if not proposals:
             return
         w = self.window
-        w._pushAnnotationUndo()
+        w.annotations._pushAnnotationUndo()
         last_id = None
         for proposal in proposals:
-            annotation = w.video_annotation_project.add_geometry_annotation(
-                w._annotationTimeline(), 'lin', copy.deepcopy(proposal.vertices),
-                w.annotation_kind_combo.currentText(), w.annotation_outcome_combo.currentText(),
-                w.annotation_note_edit.text(), self.detected_dx)
-            w._setAnnotationVehicleLabels(annotation)
+            annotation = w.annotations.video_annotation_project.add_geometry_annotation(
+                w.sync._annotationTimeline(), 'lin', copy.deepcopy(proposal.vertices),
+                w.annotations.annotation_kind_combo.currentText(), w.annotations.annotation_outcome_combo.currentText(),
+                w.annotations.annotation_note_edit.text(), self.detected_dx)
+            w.annotations._setAnnotationVehicleLabels(annotation)
             last_id = annotation.identifier
             del self.candidates[proposal.identifier]
         self.selected_id = None
-        w.video_annotation_selected_id = last_id
-        w._markVideoAnnotationDirty()
-        w.refreshVideoAnnotationTable(last_id)
+        w.annotations.video_annotation_selected_id = last_id
+        w.sync._markVideoAnnotationDirty()
+        w.annotations.refreshVideoAnnotationTable(last_id)
         self.refresh()
-        w.plotVideoComparisonImage(preserve_view=True)
+        w.video_plot.plotVideoComparisonImage(preserve_view=True)
         if self.dialog is not None:
             self.dialog.status.setText(f'已确认 {len(proposals)} 条轨迹；可撤销，保存工程后持久保留')
 
     def render(self):
         w = self.window
-        if not self.context_matches(self.context) or not w.video_annotations_visible_checkbox.isChecked():
+        if not self.context_matches(self.context) or not w.video_plot.video_annotations_visible_checkbox.isChecked():
             return
-        timeline = w._annotationTimeline()
+        timeline = w.sync._annotationTimeline()
         if timeline is None:
             return
-        origin = getattr(w, '_video_plot_channel_from', 1)
+        origin = getattr(w.video_plot, '_video_plot_channel_from', 1)
         for proposal in self.candidates.values():
             points = [[p[0] / timeline.sampling_rate, p[1] - origin + 0.5] for p in proposal.vertices]
-            w.annotation_canvas.render_shape(
+            w.annotations.annotation_canvas.render_shape(
                 -proposal.identifier, 'lin', points, f'C{proposal.identifier}',
                 proposal.identifier == self.selected_id,
                 f'未确认候选 C{proposal.identifier}；连续性 {proposal.continuity:.0%}\n'

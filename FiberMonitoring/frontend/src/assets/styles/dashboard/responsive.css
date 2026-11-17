@@ -1,0 +1,40 @@
+/* Keep the reference proportions; compact changes only resolve real content pressure. */
+.monitoring-dashboard .scene-view-tabs { top: calc(18 * var(--ui-unit)); left: calc(26 * var(--ui-unit)); border: 1px solid #286d9d; border-radius: calc(10 * var(--ui-unit)); background: linear-gradient(110deg, #082f52e8, #051d39e8); }
+.monitoring-dashboard .scene-view-tabs button { min-height: max(28px, calc(56 * var(--ui-unit))); padding: 0 calc(22 * var(--ui-unit)); gap: calc(12 * var(--ui-unit)); font-size: max(12px, calc(25 * var(--ui-unit))); font-weight: 500; color: #cbdcf0; }
+.monitoring-dashboard .scene-view-tabs button svg { width: calc(30 * var(--ui-unit)); height: calc(30 * var(--ui-unit)); }
+.monitoring-dashboard .scene-view-tabs button.active { color: #f4fdff; background: linear-gradient(145deg, #0797ca, #06538b); box-shadow: inset 0 0 0 1px #24ceff, inset 0 -2px 6px #18bcff60; }
+.monitoring-dashboard .scene-indicators { top: calc(90 * var(--ui-unit)); left: calc(32 * var(--ui-unit)); font-size: max(11px, calc(18 * var(--ui-unit))); }
+.monitoring-dashboard .scene-playback { left: calc(28 * var(--ui-unit)); bottom: calc(18 * var(--ui-unit)); gap: calc(16 * var(--ui-unit)); padding: calc(9 * var(--ui-unit)) calc(15 * var(--ui-unit)); font-size: max(11px, calc(18 * var(--ui-unit))); }
+@media (max-width: 1800px) {
+  .platform-header nav button { gap: calc(9 * var(--ui-unit)); }
+  .header-actions { gap: calc(9 * var(--ui-unit)); }
+  .header-actions .window-maximize { display: none; }
+  .telemetry-source { font-size: 10px; }
+}
+@media (max-width: 1450px) {
+  .platform-brand { flex-basis: calc(780 * var(--ui-unit)); }
+  .platform-brand h1 { font-size: calc(41 * var(--ui-unit)); letter-spacing: 0; }
+  .platform-header nav button { font-size: 12px; gap: 5px; }
+  .header-actions { gap: 3px; margin-left: 2px; }
+  .header-actions .administrator, .header-actions .avatar { display: none; }
+  .overview-card { gap: calc(14 * var(--ui-unit)); padding: 0 calc(19 * var(--ui-unit)); }
+  .event-card-title { grid-template-columns: calc(32 * var(--ui-unit)) minmax(0, 1fr) auto; }
+  .event-card-title time { display: none; }
+  .compact-event-time { display: block; }
+  .event-card-title b { padding: 0 6px; }
+  .status-tiles > div { padding: calc(12 * var(--ui-unit)); gap: calc(9 * var(--ui-unit)); }
+  .telemetry-source { display: none; }
+  .signal-metrics article { gap: calc(8 * var(--ui-unit)); padding: calc(12 * var(--ui-unit)); }
+  .signal-metrics article span { font-size: 10px; }
+}
+@media (max-width: 1100px) {
+  .monitoring-dashboard { overflow: auto; min-width: 960px; min-height: 640px; }
+  .platform-header nav button svg { display: none; }
+  .header-actions .avatar, .administrator { display: none; }
+}
+@media (max-aspect-ratio: 4/3) {
+  .monitoring-dashboard { grid-template-rows: calc(88 * var(--ui-unit)) calc(116 * var(--ui-unit)) minmax(360px, 1fr) calc(280 * var(--ui-unit)); overflow-y: auto; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .monitoring-dashboard *, .monitoring-dashboard *::before, .monitoring-dashboard *::after { transition: none !important; scroll-behavior: auto !important; }
+}

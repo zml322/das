@@ -43,7 +43,7 @@ def datetime_from_header(header: Sequence[float]) -> Optional[datetime]:
 
 
 def recorded_end_time(path: str, header: Sequence[float]) -> Tuple[datetime, str]:
-    """Prefer the filename end time and fall back to the BIN/DAT header."""
+    """Prefer the filename end time and fall back to the BIN header."""
 
     filename_time = parse_filename_end_time(path)
     if filename_time is not None:

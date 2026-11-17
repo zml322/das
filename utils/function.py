@@ -9,20 +9,15 @@ import os
 import sys
 import tempfile
 from pathlib import Path
-from typing import Union, Optional, TYPE_CHECKING
+from typing import Union, Optional
 
 import numpy as np
 import soundfile
-from PyQt5.QtGui import QIcon, QColor
-from PyQt5.QtWidgets import QMessageBox, QWidget, QVBoxLayout
-from scipy.signal import detrend
+from PyQt5.QtGui import QIcon
+from PyQt5.QtWidgets import QMessageBox, QWidget
 
-# 延迟导入避免循环依赖
-if TYPE_CHECKING:
-    from ui.widgets.custom_widgets import MyPlotWidget
-
-DAS_FILE_FILTER = 'DAS data (*.dat *.bin)'
-DAS_FILE_SUFFIXES = ('.dat', '.bin')
+DAS_FILE_FILTER = 'BIN data (*.bin *.BIN)'
+DAS_FILE_SUFFIXES = ('.bin',)
 
 
 def resourcePath(relative_path: str) -> str:
@@ -123,18 +118,6 @@ def writeWav(path: str, data: np.array, sr: int) -> None:
     soundfile.write(os.path.join(path, 'temp.wav'), data, sr)
 
 
-def detrendData(data: np.array) -> np.array:
-    """
-    去除信号的均值和线性趋势
-    Args:
-        data: 数据
-
-    Returns: 去趋势后的数据
-
-    """
-    data = detrend(data, axis=1, type='constant')
-    data = detrend(data, axis=1, type='linear')
-    return data
 
 
 def toAmplitude(data: np.array) -> np.array:
@@ -173,42 +156,3 @@ def xAxis(num: int,
     end = begin + num - 1 if end is None else end
     # 第一个采样点对应 0s；与 BIN notebook 的 np.arange(num) / fs 一致。
     return np.linspace(begin - 1, end - 1, num) / sampling_rate
-
-
-def initCombinedPlotWidget(data: np.array,
-                           title: str,
-                           begin: int,
-                           end: int,
-                           num: int,
-                           sampling_rate: int,
-                           ) -> QWidget:
-    """
-    创建返回结合两个 pw 的 Qwidget
-    Args:
-        data: 数据
-        title: 组件名
-        begin: 数据轴开始值
-        end: 数据轴结束值
-        num: 数据点数量
-        sampling_rate: 采样率
-
-    Returns: 生成的组合组件
-
-    """
-    from ui.widgets.custom_widgets import MyPlotWidget  # 延迟导入避免循环依赖
-
-    x = xAxis(num, begin, end, sampling_rate)
-    data_widget = MyPlotWidget(f'{title}', '时间（s）', '相位差（rad）', grid=True)
-    data_widget.draw(x, data, pen=QColor('blue'))
-
-    data = toAmplitude(data)
-    x = xAxis(num, sampling_rate=sampling_rate, freq=True)
-    fre_amp_widget = MyPlotWidget('幅值图', '频率（Hz）', '幅值', grid=True)
-    fre_amp_widget.draw(x, data, pen=QColor('blue'))
-
-    combined_widget = QWidget()
-    vbox = QVBoxLayout()
-    vbox.addWidget(data_widget)
-    vbox.addWidget(fre_amp_widget)
-    combined_widget.setLayout(vbox)
-    return combined_widget

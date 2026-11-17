@@ -1,0 +1,40 @@
+{
+  "context": "1920x1080 Headless Microsoft Edge; desktop app running concurrently",
+  "metrics": {
+    "reflectionFrames": 0,
+    "frames": 56,
+    "rafFrames": 269,
+    "framesPerSecond": 27.990203428966698,
+    "gpu": "ANGLE (Intel, Intel(R) Arc(TM) 130T GPU (16GB) (0x00007D51) Direct3D11 vs_5_0 ps_5_0, D3D11)",
+    "triangles": 1056081,
+    "drawCalls": 488,
+    "vehicles": [
+      {
+        "name": "vehicle_truck",
+        "asset": true,
+        "parts": 10
+      },
+      {
+        "name": "vehicle_sedan",
+        "asset": true,
+        "parts": 10
+      },
+      {
+        "name": "vehicle_bus",
+        "asset": true,
+        "parts": 12
+      },
+      {
+        "name": "vehicle_sedan",
+        "asset": true,
+        "parts": 10
+      }
+    ],
+    "reflectionVisible": true,
+    "memory": {
+      "geometries": 407,
+      "textures": 66
+    }
+  },
+  "errors": []
+}

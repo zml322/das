@@ -18,6 +18,7 @@ from scipy.signal import medfilt, medfilt2d, detrend
 from scipy.signal.windows import *
 
 from core.data.bin_reader import bin2numpy, read_bin_header
+from core.data.bin_loader import validate_bin_paths
 from utils.function import DAS_FILE_FILTER, printError, setPicture
 from utils.theme import ui_font_family
 from ui.widgets.custom_widgets import Dialog, Label, TextEdit, PushButton, LineEditWithReg, ComboBox, CheckBox
@@ -54,7 +55,7 @@ class Base:
             noise: 包含分段噪声信号的字典，时长需为一个文件长，键为噪声文件路径，格式为 pathlib.PosixPath，
                    值为包含与当前噪声文件对应的起止通道（包含）的List，且每段通道数之和应与数据文件总通道数一致，
                    各噪声文件其他参数应于数据文件一致
-            file_path: 由 pathlib.PosixPath 组成的列表，每一个都是以.dat或.bin为结尾的数据文件
+            file_path: BIN 数据文件路径列表
             signal_threshold_ratio: 信号特征阈值与噪声段特征的比
             endpoint_threshold_ratio: 信号端点特征阈值与噪声段特征的比
             minimal_signal_length: 信号最短长度，信号长度小于该值会被舍去
@@ -175,39 +176,18 @@ class Base:
         Returns: 数据
 
         """
-        suffixes = {file.suffix.lower() for file in self.file_path}
-        if len(suffixes) != 1:
-            raise ValueError("一次只能读取同一种格式的数据文件。")
-
+        validate_bin_paths(self.file_path)
         first_file = self.file_path[0]
-        if first_file.suffix.lower() == ".bin":
-            _header, self.sampling_times, self.channels_num, self.sampling_rate, _ = read_bin_header(first_file)
-        else:
-            raw_data = np.fromfile(first_file, dtype="<f4")
-            self.sampling_rate = int(raw_data[6])
-            self.sampling_times = int(raw_data[7])
-            self.channels_num = int(raw_data[9])
+        _header, self.sampling_times, self.channels_num, self.sampling_rate, _ = read_bin_header(first_file)
 
         data = []
         for file in self.file_path:
-            if file.suffix.lower() == ".bin":
-                _header, sampling_times, channels_num, sampling_rate, _ = read_bin_header(file)
-                if not np.isclose(sampling_rate, self.sampling_rate):
-                    printError(
-                        f"data file {file} has sampling rate: {sampling_rate}, while first data file has {self.sampling_rate}"
-                    )
-                if sampling_times != self.sampling_times:
-                    printError(
-                        f"data file {file} has sampling times: {sampling_times}, while first data file has {self.sampling_times}"
-                    )
-                if channels_num != self.channels_num:
-                    printError(
-                        f"data file {file} has channels: {channels_num}, while first data file has {self.channels_num}"
-                    )
-                data.append(bin2numpy(file, 0, self.channels_num))
-            else:
-                raw_data = np.fromfile(file, dtype="<f4")
-                data.append(raw_data[10:].reshape(self.channels_num, self.sampling_times))
+            _header, sampling_times, channels_num, sampling_rate, _ = read_bin_header(file)
+            if not np.isclose(sampling_rate, self.sampling_rate):
+                raise ValueError(f'{file}: 采样率与首个文件不一致')
+            if sampling_times != self.sampling_times or channels_num != self.channels_num:
+                raise ValueError(f'{file}: 采样点数或通道数与首个文件不一致')
+            data.append(bin2numpy(file))
         return np.concatenate(data, axis=1)
 
     def _read_noise(self) -> np.array:
@@ -216,15 +196,9 @@ class Base:
         Returns:
 
         """
-        if self.noise.suffix.lower() == ".bin":
-            _header, sampling_times, channels_num, sampling_rate, _ = read_bin_header(self.noise)
-            noise_data = bin2numpy(self.noise, 0, channels_num)
-        else:
-            raw_data = np.fromfile(self.noise, dtype="<f4")
-            sampling_rate = int(raw_data[6])
-            sampling_times = int(raw_data[7])
-            channels_num = int(raw_data[9])
-            noise_data = raw_data[10:].reshape(channels_num, sampling_times)
+        validate_bin_paths([self.noise])
+        _header, sampling_times, channels_num, sampling_rate, _ = read_bin_header(self.noise)
+        noise_data = bin2numpy(self.noise, 0, channels_num)
 
         if sampling_rate != self.sampling_rate:
             printError(
@@ -838,7 +812,7 @@ class DataSifting:
                     figure_widget = obj.plot_single_channel()
                 else:
                     figure_widget = obj.plot_heatmap()
-                self.parent.tab_widget.addTab(figure_widget, f'{method}筛选结果：'
+                self.parent.workspace.tab_widget.addTab(figure_widget, f'{method}筛选结果：'
                                                              f'信号阈值={self.signal_threshold}\t'
                                                              f'信号端点阈值={self.endpoint_threshold}')
 

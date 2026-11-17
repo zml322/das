@@ -1,0 +1,121 @@
+/* 全局样式 */
+:root {
+  --color-bg-primary: #0a0e1a;
+  --color-bg-secondary: #131a2e;
+  --color-bg-panel: rgba(19, 26, 46, 0.85);
+  --color-border: #1a3a5a;
+  --color-text-primary: #e0e0e0;
+  --color-text-secondary: #a0a0a0;
+  --color-accent: #00aaff;
+  --color-accent-glow: rgba(0, 170, 255, 0.3);
+  --color-success: #00ff88;
+  --color-warning: #ffaa00;
+  --color-danger: #ff4444;
+  --color-info: #00aaff;
+}
+
+body {
+  background-color: var(--color-bg-primary);
+  color: var(--color-text-primary);
+}
+
+/* 滚动条样式 */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--color-bg-secondary);
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--color-border);
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-accent);
+}
+
+/* 透明面板 */
+.panel {
+  background: var(--color-bg-panel);
+  border: 1px solid var(--color-border);
+  backdrop-filter: blur(10px);
+}
+
+/* 发光边框 */
+.glow-border {
+  border: 1px solid var(--color-accent);
+  box-shadow: 0 0 10px var(--color-accent-glow);
+}
+
+/* 按钮样式 */
+.btn {
+  padding: 8px 16px;
+  background: var(--color-bg-secondary);
+  border: 1px solid var(--color-border);
+  color: var(--color-text-primary);
+  cursor: pointer;
+  transition: all 0.3s ease;
+}
+
+.btn:hover {
+  border-color: var(--color-accent);
+  color: var(--color-accent);
+  box-shadow: 0 0 8px var(--color-accent-glow);
+}
+
+.btn-primary {
+  background: var(--color-accent);
+  color: #fff;
+}
+
+.btn-primary:hover {
+  background: #0088cc;
+  box-shadow: 0 0 12px var(--color-accent-glow);
+}
+
+/* 输入框样式 */
+.input {
+  padding: 8px 12px;
+  background: var(--color-bg-secondary);
+  border: 1px solid var(--color-border);
+  color: var(--color-text-primary);
+  outline: none;
+  transition: all 0.3s ease;
+}
+
+.input:focus {
+  border-color: var(--color-accent);
+  box-shadow: 0 0 8px var(--color-accent-glow);
+}
+
+/* 状态指示灯 */
+.status-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-right: 6px;
+}
+
+.status-online {
+  background: var(--color-success);
+  box-shadow: 0 0 6px var(--color-success);
+}
+
+.status-offline {
+  background: #666;
+}
+
+.status-warning {
+  background: var(--color-warning);
+  box-shadow: 0 0 6px var(--color-warning);
+}
+
+.status-error {
+  background: var(--color-danger);
+  box-shadow: 0 0 6px var(--color-danger);
+}

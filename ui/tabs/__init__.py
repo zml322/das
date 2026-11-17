@@ -1,11 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Tab页面模块
+主窗口功能模块：数据、绘图、滤波、车辆分析和视频对照。
 
-未来可以拆分MainWindow的7252行代码为独立Tab：
-- data_tab: 数据加载和显示
-- filter_tab: 滤波处理
-- analysis_tab: 信号分析
-- video_tab: 视频同步
-- tracking_tab: 车辆追踪
+各控制器独立持有状态和资源，由 MainWindow 组合；跨模块显式访问所属控制器。
 """

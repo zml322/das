@@ -1,0 +1,166 @@
+{
+  "resolutions": [
+    {
+      "width": 2444,
+      "height": 1377,
+      "visibleLabels": 10,
+      "hits": [],
+      "outside": [],
+      "forestInstances": 31770,
+      "triangles": 1056081,
+      "drawCalls": 488,
+      "camera": [
+        -41.999999999999986,
+        11.999999999999993,
+        59.999999999999986
+      ]
+    },
+    {
+      "width": 1920,
+      "height": 1080,
+      "visibleLabels": 10,
+      "hits": [],
+      "outside": [],
+      "forestInstances": 31770,
+      "triangles": 1111897,
+      "drawCalls": 481,
+      "camera": [
+        -41.999999999999986,
+        11.999999999999993,
+        59.999999999999986
+      ]
+    },
+    {
+      "width": 1600,
+      "height": 900,
+      "visibleLabels": 10,
+      "hits": [],
+      "outside": [],
+      "forestInstances": 31770,
+      "triangles": 1056081,
+      "drawCalls": 488,
+      "camera": [
+        -41.999999999999986,
+        11.999999999999993,
+        59.999999999999986
+      ]
+    },
+    {
+      "width": 1280,
+      "height": 720,
+      "visibleLabels": 10,
+      "hits": [],
+      "outside": [],
+      "forestInstances": 31770,
+      "triangles": 1056081,
+      "drawCalls": 488,
+      "camera": [
+        -41.999999999999986,
+        11.999999999999993,
+        59.999999999999986
+      ]
+    },
+    {
+      "width": 1600,
+      "height": 952,
+      "visibleLabels": 10,
+      "hits": [],
+      "outside": [],
+      "forestInstances": 31770,
+      "triangles": 1079324,
+      "drawCalls": 457,
+      "camera": [
+        -41.999999999999986,
+        11.999999999999993,
+        59.999999999999986
+      ]
+    }
+  ],
+  "views": [
+    {
+      "view": "俯视",
+      "visibleLabels": 0,
+      "hits": [],
+      "outside": [],
+      "forestInstances": 31770,
+      "triangles": 1827634,
+      "drawCalls": 329,
+      "camera": [
+        0,
+        84.99580885598446,
+        0.8499864216295758
+      ]
+    },
+    {
+      "view": "地下",
+      "visibleLabels": 10,
+      "hits": [],
+      "outside": [],
+      "forestInstances": 31770,
+      "triangles": 1455251,
+      "drawCalls": 458,
+      "camera": [
+        -32,
+        6.000000000000003,
+        60
+      ]
+    },
+    {
+      "view": "横断面",
+      "visibleLabels": 10,
+      "hits": [],
+      "outside": [],
+      "forestInstances": 31770,
+      "triangles": 1666928,
+      "drawCalls": 480,
+      "camera": [
+        -75,
+        2.9999999999999947,
+        32
+      ]
+    },
+    {
+      "view": "纵断面",
+      "visibleLabels": 10,
+      "hits": [],
+      "outside": [],
+      "forestInstances": 31770,
+      "triangles": 979897,
+      "drawCalls": 398,
+      "camera": [
+        0,
+        8.000000000000005,
+        80
+      ]
+    },
+    {
+      "view": "全景",
+      "visibleLabels": 10,
+      "hits": [],
+      "outside": [],
+      "forestInstances": 31770,
+      "triangles": 1111897,
+      "drawCalls": 481,
+      "camera": [
+        -41.999999999999986,
+        11.999999999999993,
+        59.999999999999986
+      ]
+    }
+  ],
+  "errors": [],
+  "warnings": [],
+  "externalRequests": [],
+  "checks": {
+    "sixLayerControls": true,
+    "opacity": true,
+    "waterPauseResume": true,
+    "orbit": true,
+    "reset": true,
+    "routeDisposeAndRecreate": true,
+    "assetFailureFallback": true,
+    "vehicleAssets": true,
+    "reflectionControl": true,
+    "shaderConsoleErrors": 0
+  }
+}

@@ -1,0 +1,47 @@
+{
+  "license": "CC0",
+  "files": [
+    {
+      "path": "rock-color.jpg",
+      "asset": "brown_mud_rocks_01",
+      "size": 887215,
+      "md5": "19e4d0066282bd8439bdc713310bbbe4",
+      "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/1k/brown_mud_rocks_01/brown_mud_rocks_01_diff_1k.jpg"
+    },
+    {
+      "path": "rock-normal.jpg",
+      "asset": "brown_mud_rocks_01",
+      "size": 1400087,
+      "md5": "aea4a53ff5a38070e7dbda4feb81a0b9",
+      "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/1k/brown_mud_rocks_01/brown_mud_rocks_01_nor_gl_1k.jpg"
+    },
+    {
+      "path": "rock-roughness.jpg",
+      "asset": "brown_mud_rocks_01",
+      "size": 719533,
+      "md5": "db5dd3d5b7bc5230f89581c511a51dbd",
+      "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/1k/brown_mud_rocks_01/brown_mud_rocks_01_rough_1k.jpg"
+    },
+    {
+      "path": "sand-color.jpg",
+      "asset": "gravelly_sand",
+      "size": 1062525,
+      "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/1k/gravelly_sand/gravelly_sand_diff_1k.jpg",
+      "md5": "16b7593a26ce1bd43f1d95e61dc25f05"
+    },
+    {
+      "path": "sand-normal.jpg",
+      "asset": "gravelly_sand",
+      "size": 1387739,
+      "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/1k/gravelly_sand/gravelly_sand_nor_gl_1k.jpg",
+      "md5": "92053a3e135c938def2dc974c76e3763"
+    },
+    {
+      "path": "sand-roughness.jpg",
+      "asset": "gravelly_sand",
+      "size": 419895,
+      "url": "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/1k/gravelly_sand/gravelly_sand_rough_1k.jpg",
+      "md5": "1152ab34b85ec42a5d4d6c8ed2c1100b"
+    }
+  ]
+}

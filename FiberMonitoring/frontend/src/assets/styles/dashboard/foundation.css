@@ -1,0 +1,52 @@
+/* Reference canvas: 2444 × 1377. All major dimensions share one scale. */
+.monitoring-dashboard {
+  --ui-unit: calc(100vw / 2444);
+  --ink: #e8f3ff; --muted: #adc6df; --line: #12618c;
+  --cyan: #20d4ff; --green: #20ef99; --amber: #ffc54d;
+  --panel-radius: calc(18 * var(--ui-unit)); --space: calc(18 * var(--ui-unit));
+  height: 100dvh; min-height: 0; display: grid;
+  grid-template-rows: calc(88 * var(--ui-unit)) calc(116 * var(--ui-unit)) minmax(0, 1fr) calc(244 * var(--ui-unit));
+  gap: var(--space); padding: 0 calc(14 * var(--ui-unit)) calc(28 * var(--ui-unit));
+  color: var(--ink);
+  background: radial-gradient(ellipse at 50% 0, #062957 0, #02152d 46%, #010d20 100%);
+  font-family: 'Microsoft YaHei', 'Segoe UI', sans-serif;
+  font-size: max(12px, calc(24 * var(--ui-unit))); line-height: 1.4; overflow: hidden;
+}
+.monitoring-dashboard :where(button, select, input) { font-family: inherit; }
+.monitoring-dashboard :where(button) { border: 0; background: none; color: inherit; cursor: pointer; }
+.monitoring-dashboard :where(button, a, select, summary, input) { -webkit-tap-highlight-color: transparent; }
+.monitoring-dashboard :where(button, a) { transition: color 140ms ease, background-color 140ms ease, border-color 140ms ease; }
+.monitoring-dashboard :where(button, a):hover { color: #70e3ff; }
+.monitoring-dashboard :focus-visible { outline: 2px solid #8deaff; outline-offset: 3px; }
+.monitoring-dashboard input[type='checkbox'] {
+  appearance: none; flex: 0 0 auto; position: relative;
+  width: max(15px, calc(25 * var(--ui-unit))); height: max(15px, calc(25 * var(--ui-unit)));
+  border: 1px solid #2e9ee1; border-radius: calc(3 * var(--ui-unit)); background: #042c51; cursor: pointer;
+}
+.monitoring-dashboard input[type='checkbox']:checked { background: linear-gradient(#00c3ff, #0085ef); box-shadow: inset 0 1px 2px #91e7ff80, 0 0 5px #008fff60; }
+.monitoring-dashboard input[type='checkbox']:checked::after {
+  content: ''; position: absolute; left: 28%; top: 11%; width: 29%; height: 51%;
+  border: solid white; border-width: 0 2px 2px 0; transform: rotate(43deg);
+}
+.monitoring-dashboard input[type='range'] { width: 100%; min-width: 0; height: max(18px, calc(28 * var(--ui-unit))); accent-color: #009fff; cursor: pointer; }
+.instrument-panel {
+  position: relative; min-width: 0; min-height: 0; border: 1px solid #14618e; border-radius: var(--panel-radius);
+  background: linear-gradient(135deg, #052442 0, #02162e 65%, #031a35 100%);
+  box-shadow: inset 0 0 0 1px #0a3655, inset 0 1px 12px #008ce718, 0 0 8px #001329; overflow: hidden;
+}
+.instrument-panel::before, .instrument-panel::after {
+  content: ''; position: absolute; pointer-events: none; z-index: 1; height: 2px;
+  background: linear-gradient(90deg, transparent, #04c7ff, #52dcff, transparent); box-shadow: 0 0 8px #00bfff90;
+}
+.instrument-panel::before { top: 0; left: 24%; right: 8%; }
+.instrument-panel::after { bottom: 0; left: 8%; right: 32%; opacity: .7; }
+.instrument-panel h2 {
+  height: calc(68 * var(--ui-unit)); min-height: calc(68 * var(--ui-unit)); flex-shrink: 0;
+  display: flex; align-items: center; gap: calc(16 * var(--ui-unit));
+  margin: 0 calc(26 * var(--ui-unit)); border-bottom: 1px solid #155784;
+  font-size: max(15px, calc(28 * var(--ui-unit))); font-weight: 600; letter-spacing: .5px; white-space: nowrap;
+}
+.instrument-panel h2 > svg { width: calc(34 * var(--ui-unit)); height: calc(34 * var(--ui-unit)); color: #31dcff; filter: drop-shadow(0 0 4px #00aaff65); }
+.micro { color: #9cbad4; font-size: max(10px, calc(16 * var(--ui-unit))); margin-left: auto; }
+.online-dot { display: inline-block; width: calc(10 * var(--ui-unit)); height: calc(10 * var(--ui-unit)); border-radius: 50%; background: var(--green); box-shadow: 0 0 9px #00f29c90; flex-shrink: 0; }
+.empty-state { padding: calc(28 * var(--ui-unit)); text-align: center; color: var(--muted); font-size: max(12px, calc(21 * var(--ui-unit))); }
