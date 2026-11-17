@@ -8,7 +8,8 @@ import pyqtgraph as pg
 from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtWidgets import QApplication, QMessageBox
 
-from core.filter.das_filter import DASFilterDialog
+from core.filter.algorithms import ALGORITHM_LABELS
+from ui.filter_panel import DASFilterDialog
 from core.filter.filter_history import (
     add_recent_history,
     history_entry_steps,

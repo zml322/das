@@ -2,7 +2,7 @@
 
 import numpy as np
 
-from core.filter.das_filter import apply_das_filter
+from core.filter.algorithms import apply_das_filter
 from core.data.data_group import ensure_memory_budget
 
 

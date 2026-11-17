@@ -9,7 +9,7 @@ import numpy as np
 from scipy import signal
 
 from core.data.data_group import DataGroup, ensure_memory_budget
-from core.filter.das_filter import apply_das_filter
+from core.filter.algorithms import apply_das_filter
 from core.tracking.vehicle_preprocessing import preprocess_vehicle_response
 from core.tracking.vehicle_tracking import (
     VehicleTrajectory,

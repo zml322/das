@@ -5,7 +5,7 @@ from datetime import datetime
 import numpy as np
 from PyQt5.QtWidgets import QMessageBox
 
-from core.filter.das_filter import ALGORITHM_LABELS, DASFilterDialog
+from core.filter.algorithms import ALGORITHM_LABELS
 from core.filter.filter_history import (
     add_recent_history,
     history_entry_steps,
@@ -15,6 +15,7 @@ from core.filter.filter_history import (
 )
 from core.filter.filter_pipeline import FilterStep, clone_steps
 from ui.components.window_feature import WindowFeature
+from ui.filter_panel import DASFilterDialog
 from ui.widgets.custom_widgets import Action, Menu
 from utils.function import printError
 
