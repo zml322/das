@@ -64,6 +64,27 @@ try{
   resizeTarget.container.clientWidth=1000
   SceneManager.prototype.handleResize.call(resizeTarget)
   assert.equal(resizeCalls.length,2)
+  // ResizeObserver must not clear the live canvas outside a rendered frame.
+  let resizeCallback
+  globalThis.ResizeObserver=class { constructor(callback){resizeCallback=callback} observe(){} }
+  const frameCalls=[]
+  const frameTarget={
+    container:{clientWidth:800,clientHeight:500},lastFrame:100,resizePending:false,
+    scene:new THREE.Scene(),camera:new THREE.PerspectiveCamera(),
+    visualState:{},effectClock:{time:0,advance(){}},
+    cameraController:{update(){}},controls:{update(){}},annotations:{update(){}},
+    handleResize(){frameCalls.push('resize')},renderer:{render(){frameCalls.push('render')}},
+  }
+  SceneManager.prototype.setupResizeObserver.call(frameTarget)
+  resizeCallback();resizeCallback()
+  assert.deepEqual(frameCalls,[],'resize notifications only queue the latest dimensions')
+  SceneManager.prototype.renderFrame.call(frameTarget,110)
+  assert.deepEqual(frameCalls,[],'a skipped frame must not clear the canvas')
+  SceneManager.prototype.renderFrame.call(frameTarget,140)
+  assert.deepEqual(frameCalls,['resize','render'],'resize is immediately followed by rendering')
+  SceneManager.prototype.renderFrame.call(frameTarget,180)
+  assert.deepEqual(frameCalls,['resize','render','render'],'unchanged dimensions do not resize again')
+  delete globalThis.ResizeObserver
   SceneManager.prototype.setUndergroundOpacity.call(manager,.6)
   assert.equal(soil.children[0].material.depthWrite,false)
   SceneManager.prototype.setUndergroundOpacity.call(manager,1)

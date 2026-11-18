@@ -54,7 +54,7 @@ def read_vehicle_response(group, raw_data, visible_start, visible_end,
                           channel_from, channel_to, parameters, *,
                           check_cancel=None, progress=None):
     """Read original samples plus filter context, retaining global origins."""
-    from core.video.trajectory import read_group_window
+    from core.data.window_reader import read_group_window
 
     fs = float(group.sampling_rate)
     low = float(parameters.get('frequency_low', 0.01))

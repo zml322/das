@@ -95,6 +95,7 @@ export function useMonitoringScene(
     error,
     notice,
     ready,
+    setAnnotationsDetailed: (value: boolean) => manager?.annotations.setDetailed(value),
     setLayer,
     setOpacity,
     preset,

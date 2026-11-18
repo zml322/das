@@ -112,14 +112,14 @@ export function emphasizeMarker(group: THREE.Object3D, color: THREE.ColorReprese
     glow.addColorStop(0,'rgba(255,255,255,1)');glow.addColorStop(.09,'rgba(255,255,255,.95)')
     glow.addColorStop(.2,'rgba(255,255,255,.15)');glow.addColorStop(.6,'rgba(255,255,255,.04)');glow.addColorStop(1,'rgba(255,255,255,0)')
     ctx.fillStyle=glow;ctx.fillRect(0,0,256,256)
-    for(const radius of [33,49,67,86]){
+    for(const radius of [49]){
       ctx.strokeStyle='rgba(255,255,255,'+(.65-radius*.004)+')';ctx.lineWidth=2
       ctx.beginPath();ctx.arc(128,128,radius,0,Math.PI*2);ctx.stroke()
     }
   }
   const texture=new THREE.CanvasTexture(canvas);texture.colorSpace=THREE.SRGBColorSpace
-  const halo=new THREE.Sprite(new THREE.SpriteMaterial({map:texture,color,transparent:true,depthWrite:false,toneMapped:false,blending:THREE.AdditiveBlending}))
-  halo.name='markerHalo';halo.scale.setScalar(6.5);group.add(halo)
+  const halo=new THREE.Sprite(new THREE.SpriteMaterial({map:texture,color,transparent:true,opacity:.65,depthWrite:false,toneMapped:false,blending:THREE.AdditiveBlending}))
+  halo.name='markerHalo';halo.scale.setScalar(2.6);group.add(halo)
   group.getObjectByName('markerCone')!.visible=false
 }
 
@@ -187,7 +187,7 @@ export function updateVisuals(root: THREE.Object3D, time: number, state: VisualS
       ring.material.opacity = active ? 0.65*(1-((time*0.5)%1)*0.7) : 0.3
       const halo = object.getObjectByName('markerHalo') as THREE.Sprite | undefined
       if(halo){
-        halo.scale.setScalar(6.5+(active?Math.sin(time*2)*.3:0))
+        halo.scale.setScalar(2.6+(active?Math.sin(time*2)*.1:0))
         halo.material.color.copy((object.getObjectByName('markerCone') as THREE.Mesh<THREE.BufferGeometry,THREE.MeshStandardMaterial>).material.color)
       }
     } else if (kind === 'reflection') object.visible = state.reflection

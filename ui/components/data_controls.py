@@ -72,20 +72,12 @@ class DataControlsController(WindowFeature):
         """Persist a correction and refresh all corrected-time dependent views."""
 
         self.time_correction_seconds = float(correction_seconds)
-        self.window.annotations.video_annotation_project.das_correction_seconds = self.time_correction_seconds
         self.window.preferences.set_time_correction_seconds(self.time_correction_seconds)
         self.window.data.rebuildDataTimeline()
-        self.window.video_files.rebuildVideoSequenceTimeline()
         self.window.data.updateDataGPSTime()
         self.window.overlays.updateStitchedFilesList()
-        self.window.sync.updateVideoAnnotationDataContext()
-        self.window.annotations.refreshVideoAnnotationTable(
-            select_identifier=self.window.annotations.video_annotation_selected_id
-        )
         if hasattr(self.window.data, "visible_data"):
             self.window.updateImages()
-        else:
-            self.window.video_plot.plotVideoComparisonImage()
         self.window.statusBar().showMessage(
             f"时间修正已保存：记录时间 {self.time_correction_seconds:+.3f} s。",
             8000,

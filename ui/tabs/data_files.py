@@ -16,10 +16,9 @@ from core.data.bin_loader import load_bin_group
 from core.data.data_group import natural_sort_key
 from core.data.data_timeline import DataTimeline, format_wall_time
 from core.filter.filter_pipeline import clone_steps
-from image.image import play_jpg
 from ui.components.window_feature import WindowFeature
 from ui.widgets.custom_widgets import Action, Dialog, Menu, TextEdit
-from utils.function import DAS_FILE_FILTER, DAS_FILE_SUFFIXES, printError, setPicture
+from utils.function import DAS_FILE_FILTER, DAS_FILE_SUFFIXES, printError
 
 
 class DataFilesController(WindowFeature):
@@ -151,10 +150,6 @@ class DataFilesController(WindowFeature):
         self.window.filtering.reset_das_filter_action.setEnabled(bool(self.window.filtering._das_filter_steps))
         self.window.vehicles.updateSpeedRulerButtons()
 
-        setPicture(self.window.plots.player_play_button, play_jpg, "play.jpg")
-        self.window.plots.player_play_button.setDisabled(False)
-        self.window.plots.player_stop_button.setDisabled(False)  # 设置播放按钮
-
     def updateFile(self):
         """更新文件列表显示"""
         self.file_path_line_edit.setText(self.file_path)
@@ -234,7 +229,6 @@ class DataFilesController(WindowFeature):
         self.window.plots.plot_gray_scale_widget.setTimeOrigin(self.data_timeline.start_time)
         self.window.plots.plot_single_channel_time_widget.setTimeOrigin(self.data_timeline.start_time)
         self.window.waves.multi_waves_time_axis.setOrigin(self.data_timeline.start_time)
-        self.window.video_plot.video_das_plot_widget.setTimeOrigin(self.data_timeline.start_time)
         self.window.overlays.updateEventRangeEditors()
         if self.data_timeline.discontinuities:
             self.window.statusBar().showMessage(
@@ -277,7 +271,6 @@ class DataFilesController(WindowFeature):
         previous_shape = self.raw_data.shape if self.raw_data is not None else None
         paths = [self.dataFilePath(name) for name in self.file_names]
         loaded = load_bin_group(paths, correction_seconds=self.window.controls.time_correction_seconds)
-        self.window.sync._clearVideoSequenceContext()
         self.file_names = [segment.path for segment in loaded.group.segments]
         self.data_group = loaded.group
         self.data_timeline = loaded.timeline

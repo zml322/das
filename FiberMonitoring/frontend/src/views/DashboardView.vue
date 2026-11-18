@@ -44,6 +44,7 @@
 </template>
 <script setup lang="ts">
 import { ref } from "vue";
+import { useRoute } from "vue-router";
 import { useMonitoringStore } from "@/stores/monitoring";
 import {
   defaultVisualState,
@@ -59,7 +60,7 @@ import TelemetryDock from "@/components/dashboard/TelemetryDock.vue";
 import "@/assets/styles/dashboard.css";
 const store = useMonitoringStore(),
   viewport = ref<InstanceType<typeof SceneViewport> | null>(null);
-const settingsOpen = ref(false),
+const settingsOpen = ref(useRoute().query.panel === "settings"),
   opacity = ref(100),
   visual = ref(defaultVisualState());
 if (window.matchMedia("(prefers-reduced-motion: reduce)").matches)

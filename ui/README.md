@@ -13,23 +13,20 @@
 | `components/plot_overlays.py` | 文件分段展示、事件范围联动 |
 | `components/file_segment_bar.py` | 可点击的文件分段图形项 |
 | `tabs/data_files.py` | BIN 文件选择、加载流程、数据概览刷新 |
-| `tabs/data_plots.py` | 灰度／彩色图、单通道波形和幅值图、热力图、二值图、应变图、音频 |
+| `tabs/data_plots.py` | 灰度／彩色图、单通道波形和幅值图、热力图、二值图、应变图 |
 | `tabs/multi_waves.py` | 多通道云图及浏览控件 |
 | `tabs/filtering.py` | DAS 二维滤波、预览、恢复、历史与预设 |
 | `tabs/vehicle_analysis.py` | 车辆轨迹拾取、叠加和速度标尺 |
-| `tabs/video_layout.py` | 视频对照页与标注侧栏布局 |
-| `tabs/video_files.py` | 按录像时间匹配 BIN、读取文件头建立长序列 |
+| `tabs/video_layout.py` | 独立视频播放器页面及控件绑定 |
 | `tabs/video_playback.py` | Qt／FFmpeg 播放、转码、跳转与倍速 |
-| `tabs/video_sync.py` | DAS 上下文、摄像头通道、播放线和对时校准 |
-| `tabs/video_annotations.py` | 标注绘制、编辑、工程存取、CSV、撤销重做 |
-| `tabs/video_analysis.py` | 视频侧显示滤波、后台窗口读取与轨迹分析 |
-| `tabs/video_plot.py` | 视频侧 DAS 绘图、摄像头线、播放线与专注模式 |
 
-主窗口控制器实例：`workspace`、`data`、`controls`、`plots`、`waves`、`overlays`、`vehicles`、`filtering`、`video_ui`、`video_files`、`playback`、`sync`、`annotations`、`video_analysis`、`video_plot`。
+主窗口控制器实例：`workspace`、`data`、`controls`、`plots`、`waves`、`overlays`、`vehicles`、`filtering`、`video_ui`、`playback`。
 
-`core/data/bin_loader.py` 独立处理 BIN 文件组的校验、拼接、去趋势、时间轴和采集元数据，不依赖 Qt。窗口只在读取成功后替换现有数据。长视频仍通过文件头建立序列，按需读取当前窗口。
+`core/data/bin_loader.py` 独立处理 BIN 文件组的校验、拼接、去趋势、时间轴和采集元数据，不依赖 Qt。窗口只在读取成功后替换现有数据。`core/data/window_reader.py` 提供跨文件窗口读取，供车辆分析使用。
 
-数据入口只接受 BIN。已删除 DAT/scouter、通用数据导出、BIN 转 DASPy、特征统计、独立谱分析、SNR、EMD、独立 IIR 和小波分析。保留单通道幅值图、DAS 二维滤波中的带通／陷波算法，以及标注工程和标注 CSV 导出。
+数据入口只接受 BIN。已删除 DAT/scouter、通用数据导出、BIN 转 DASPy、特征统计、独立谱分析、SNR、EMD、独立 IIR 和小波分析。
+
+视频页仅保留选择视频、播放暂停、前后跳转、倍速、进度条和时间显示，固定保持画面比例。普通视频使用 Qt；MPEG-PS 等兼容路径在后台生成独立缓存，再通过 FFmpeg 播放。视频功能不读取 DAS、不解析录像开始时间，也不维护标注工程。标签、几何标注、标注 CSV、视频对时、DAS 匹配及视频侧轨迹分析均已删除。
 
 保留文件格式／尺寸／内存校验、用户输入检查、后台任务和关闭图形项时的异常处理；删除 DAT 分支、失效状态、重复加载流程和可由控件类型保证的判断。
 
@@ -40,4 +37,4 @@
 .venv/Scripts/python.exe -m ruff check ui/main_window.py ui/tabs ui/components --select F,I
 ```
 
-本次拆分通过 13 项临时离屏回归检查，覆盖控制器状态归属、信号连接、加载失败恢复、BIN 拼接、滤波、标注、快捷键、后台窗口读取、轨迹初筛对话框、真实视频解码和关闭资源释放。检查使用临时 BIN、视频和设置，不修改真实数据或个人设置。
+本次精简通过 11 项临时离屏回归检查，覆盖视频选择、播放暂停、跳转、倍速、进度条、真实视频解码与重播、MPEG-PS 转码、切换文件、关闭释放，以及保留的数据和滤波流程。检查使用临时 BIN、视频、缓存和设置，不修改真实数据或个人设置。

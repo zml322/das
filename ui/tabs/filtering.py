@@ -206,8 +206,6 @@ class FilteringController(WindowFeature):
         self.window.preferences.set_filter_pipeline_history(self._filter_pipeline_history)
         if self.das_filter_dialog is not None:
             self.das_filter_dialog.set_saved_pipelines(self._filter_pipeline_history)
-        if self.window.video_analysis.video_filter_dialog is not None:
-            self.window.video_analysis.video_filter_dialog.set_saved_pipelines(self._filter_pipeline_history)
 
     def saveCurrentFilterPipeline(self, name: str):
         """Save the visible working chain as a named cross-restart scheme."""

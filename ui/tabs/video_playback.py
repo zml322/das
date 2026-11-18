@@ -1,376 +1,283 @@
-"""Qt and FFmpeg video playback, conversion and transport controls."""
+"""Standalone video loading, transport controls and compatible FFmpeg playback."""
 
-import os.path
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 from PyQt5 import QtMultimedia
 from PyQt5.QtCore import QEvent, Qt, QTimer, QUrl
 from PyQt5.QtGui import QPixmap
 from PyQt5.QtWidgets import QFileDialog
 
-from core.video.annotation import format_video_position, parse_video_start_time
 from core.video.media import cached_playable_video, probe_video
 from core.video.player import FfmpegFrameWorker
 from ui.components.window_feature import WindowFeature
 
-try:
-    from PyQt5.QtMultimediaWidgets import QVideoWidget
-except ImportError:
-    QVideoWidget = None
+
+def format_position(milliseconds):
+    seconds, millis = divmod(max(0, int(milliseconds)), 1000)
+    minutes, seconds = divmod(seconds, 60)
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours:02d}:{minutes:02d}:{seconds:02d}.{millis:03d}"
 
 
 class VideoPlaybackController(WindowFeature):
-    """Qt and FFmpeg video playback, conversion and transport controls."""
-
     def __init__(self, window):
         super().__init__(window)
-        self.slider_dragging = False
         self.qt_player = None
-        self.probe = None
+        self.source_path = None
         self.playback_path = None
-        self.conversion_future: Future | None = None
+        self.backend = "qt"
+        self.worker = None
+        self.position_ms = 0
+        self.duration_ms = 0
+        self.playing = False
+        self.slider_dragging = False
+        self.frame_pixmap = None
+        self.conversion_future = None
         self.conversion_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="das-video-transcode")
         self.conversion_timer = QTimer(self)
         self.conversion_timer.setInterval(250)
-        self.conversion_timer.timeout.connect(self._pollVideoMediaConversion)
-        self.backend = "qt"
-        self.worker = None
-        self.duration_ms = 0
-        self.position_ms = 0
-        self.playing = False
-        self.frame_pixmap = None
+        self.conversion_timer.timeout.connect(self._pollConversion)
 
-    def shutdown(self):
-        """Release playback resources owned by this controller."""
-        self.conversion_timer.stop()
-        self._stopFfmpegVideoWorker()
-        if self.qt_player is not None:
-            self.qt_player.stop()
-        self.conversion_executor.shutdown(wait=False, cancel_futures=True)
+    def initializePlayer(self, surface):
+        """Attach the optional Qt output after the layout has created it."""
+        if surface is None:
+            return
+        self.qt_player = QtMultimedia.QMediaPlayer(self)
+        self.qt_player.setVideoOutput(surface)
+        self.qt_player.positionChanged.connect(self._positionChanged)
+        self.qt_player.durationChanged.connect(self._durationChanged)
+        self.qt_player.stateChanged.connect(self._stateChanged)
+        self.qt_player.mediaStatusChanged.connect(self._mediaStatusChanged)
+        self.qt_player.error.connect(self._playerError)
 
-    def chooseVideoComparisonFile(self):
+    def chooseFile(self):
         path, _ = QFileDialog.getOpenFileName(
             self.window,
-            "选择摄像头视频",
+            "选择视频",
             "",
             "视频文件 (*.mp4 *.mov *.avi *.mkv *.mpeg *.mpg *.m4v);;所有文件 (*.*)",
         )
         if path:
-            self.loadVideoComparisonFile(path)
+            self.loadFile(path)
 
-    def loadVideoComparisonFile(self, path: str, update_project: bool = True):
-        """Set source media and use a local truthful-suffix cache only if needed."""
-
-        path = str(path)
-        # 加载新视频时清除正在进行的区间标注
-        self.window.annotations._cancelPendingIntervalAnnotation()
-        self.window.sync._clearVideoSequenceContext()
-        if update_project:
-            parsed_start = parse_video_start_time(path)
-            self.window.annotations.video_annotation_project.video_path = path
-            self.window.annotations.video_annotation_project.sync.update(parsed_start, 0.0, 1.0)
-            self.window.annotations.video_annotation_project.calibration_anchors = []
-            self.window.sync.video_sync_calibration_anchors = []
-            self.window.sync._video_sync_undo_stack.clear()
-            self.window.sync._finishVideoSyncPick()
-            self.window.sync._markVideoAnnotationDirty()
-            if parsed_start is None:
-                self.window.sync.video_sync_hint_label.setText("未能从文件名识别开始时间，请手工填写视频开始时间。")
-            else:
-                self.window.sync.video_sync_hint_label.setText("文件名时间作为初始值；可拖动紫色虚线对准同一车辆事件。")
-        self.window.video_files.video_das_match_required = True
-        if hasattr(self.window.workspace, "sidebar_tabs"):
-            self.window.workspace.sidebar_tabs.setCurrentWidget(self.window.video_ui.annotation_sidebar_widget)
-        self.source_label.setText(f"视频：{os.path.basename(path)}")
-        self.source_label.setToolTip(path)
-        self._stopFfmpegVideoWorker()
-        self.frame_pixmap = None
+    def loadFile(self, path):
+        """Load media without touching DAS data or automatically starting playback."""
+        self.stopWorker()
+        self.conversion_timer.stop()
+        if self.conversion_future is not None:
+            self.conversion_future.cancel()
+            self.conversion_future = None
+        if self.qt_player is not None:
+            self.qt_player.stop()
+            self.qt_player.setMedia(QtMultimedia.QMediaContent())
+        self.source_path = str(path)
+        self.playback_path = self.source_path
         self.backend = "qt"
-        self.viewport_stack.setCurrentWidget(self.surface)
-        self.playback_path = path
-        self.probe = None
-        conversion_pending = False
+        self.position_ms = self.duration_ms = 0
+        self.playing = self.slider_dragging = False
+        self.frame_pixmap = None
+        self.frame_surface.clear()
+        self.source_label.setText(Path(path).name)
+        self.source_label.setToolTip(self.source_path)
+        self.play_button.setText("播放")
+        self.position_slider.setRange(0, 0)
+        self._updateTime()
+        self._setControlsEnabled(False)
         try:
             probe = probe_video(path)
-            self.probe = probe
-            if probe.is_mpeg_program_stream:
-                duration = format_video_position(int(round((probe.duration_seconds or 0.0) * 1000)))
-                codec = probe.video_codec if probe.video_codec != "unknown" else "视频编码待媒体后端确认"
-                completion = {
-                    "terminated": "检测到节目流结束码",
-                    "truncated_or_unfinalized": "未检测到结束码；固定容量零填充，不能视为完整",
-                    "unfinalized": "未检测到节目流结束码，完整性无法确认",
-                }.get(probe.completion_state, "完整性未知")
-                self.media_info_label.setText(f"媒体探测：MPEG-PS · {codec} · PTS 时长 {duration} · {completion}")
-                self.media_info_label.setToolTip(
-                    f"只读源：{path}\n有效负载末尾：{probe.payload_end_offset:,} B；"
-                    f"零填充：{probe.trailing_zero_bytes:,} B。播放使用本机独立 .mpg 缓存副本。"
-                )
-                self._startVideoMediaConversion(path)
-                conversion_pending = True
-            else:
-                duration = format_video_position(int(round((probe.duration_seconds or 0.0) * 1000)))
-                self.media_info_label.setText(f"媒体：{probe.video_codec} · {duration}")
-                self.media_info_label.setToolTip("源文件格式由系统媒体后端直接播放。")
         except (OSError, ValueError) as error:
-            self.media_info_label.setText(f"媒体探测失败：{error}")
-        self.window.video_files._refreshVideoDasRecommendation()
-        self.window.sync._syncVideoProjectWidgets()
-        if conversion_pending:
-            if self.qt_player is not None:
-                self.qt_player.stop()
-                self.qt_player.setMedia(QtMultimedia.QMediaContent())
-            for control in (
-                self.play_button,
-                self.back_button,
-                self.forward_button,
-                self.speed_combo,
-            ):
-                control.setEnabled(False)
+            self.status_label.setText(f"视频加载失败：{error}")
+            return
+        if probe.is_mpeg_program_stream or self.qt_player is None:
+            self.backend = "ffmpeg"
             self.viewport_stack.setCurrentWidget(self.frame_surface)
-            self.frame_surface.setText("正在生成独立播放缓存；源录像不会被修改。")
-            self.position_slider.setRange(0, 0)
-            self.time_label.setText("--:--:--.--- / --:--:--.---")
-            self.window.sync._updateVideoPlayhead(0, force=True)
-            self.window.video_plot.plotVideoComparisonImage()
-            return
-        if self.qt_player is None:
-            self.window.sync.video_sync_summary_label.setText("当前 PyQt 安装没有可用的视频画面组件。")
-            return
-        self.qt_player.stop()
-        self.qt_player.setMedia(QtMultimedia.QMediaContent(QUrl.fromLocalFile(self.playback_path)))
-        self.position_slider.setRange(0, 0)
-        self.time_label.setText("--:--:--.--- / --:--:--.---")
-        self.window.sync._updateVideoPlayhead(0, force=True)
-        self.window.video_plot.plotVideoComparisonImage()
+            self.frame_surface.setText("正在准备兼容播放缓存…")
+            self.status_label.setText("正在后台准备视频…")
+            self.conversion_future = self.conversion_executor.submit(cached_playable_video, self.source_path)
+            self.conversion_timer.start()
+        else:
+            self.viewport_stack.setCurrentWidget(self.surface)
+            self.status_label.setText("正在加载视频…")
+            self.qt_player.setMedia(QtMultimedia.QMediaContent(QUrl.fromLocalFile(self.source_path)))
 
-    def _startVideoMediaConversion(self, source_path: str):
-        """Transcode incompatible MPEG-PS in background, always into its cache."""
-        expected_duration = self.probe.duration_seconds if self.probe is not None else None
-        future = self.conversion_executor.submit(cached_playable_video, source_path, None, expected_duration)
-        future._das_video_source_path = str(source_path)
-        self.conversion_future = future
-        self.conversion_timer.start()
-        self.window.sync.video_sync_summary_label.setText(
-            "正在后台生成 H.264/AAC 播放缓存；录像源保持只读，完成后可匹配 DAS。"
-        )
-
-    def _pollVideoMediaConversion(self):
+    def _pollConversion(self):
         future = self.conversion_future
         if future is None or not future.done():
             return
         self.conversion_future = None
         self.conversion_timer.stop()
         try:
-            playable_path = str(future.result())
-        except Exception as error:
-            self.window.sync.video_sync_summary_label.setText(f"播放缓存生成失败：{error}；源录像未被修改。")
-            return
-        if future._das_video_source_path != self.window.annotations.video_annotation_project.video_path:
-            return
-        self.playback_path = playable_path
-        self._loadFfmpegVideo(playable_path)
-        for control in (
-            self.play_button,
-            self.back_button,
-            self.forward_button,
-            self.speed_combo,
-        ):
-            control.setEnabled(True)
-        source_duration = (
-            int(round(self.probe.duration_seconds * 1000.0))
-            if self.probe is not None and self.probe.duration_seconds
-            else self.duration_ms
-        )
-        self.media_info_label.setText(
-            "媒体探测：MPEG-PS 已转换为独立 H.264/AAC 播放缓存；"
-            f"时间轴 {format_video_position(source_duration)}，已通过时长校验。"
-        )
-        self.window.sync.video_sync_summary_label.setText("播放缓存已就绪；可播放、跳转并与 DAS 同步。")
+            self._loadFfmpegVideo(str(future.result()))
+        except (OSError, ValueError, RuntimeError) as error:
+            self.status_label.setText(f"播放缓存生成失败：{error}")
 
-    def _loadFfmpegVideo(self, path: str):
-        """Activate deterministic FFmpeg frame playback after cache conversion."""
-        try:
-            cache_probe = probe_video(path)
-            self.duration_ms = int(round((cache_probe.duration_seconds or 0.0) * 1000.0))
-        except (OSError, ValueError):
-            self.duration_ms = 0
-        self._stopFfmpegVideoWorker()
+    def _loadFfmpegVideo(self, path):
+        self.stopWorker()
         self.backend = "ffmpeg"
+        self.playback_path = str(path)
+        self.duration_ms = int(round((probe_video(path).duration_seconds or 0) * 1000))
         self.position_ms = 0
-        self.position_slider.setRange(0, self.duration_ms)
-        self.position_slider.setValue(0)
-        self.window.sync._updateVideoTimeLabel(0, self.duration_ms)
         self.viewport_stack.setCurrentWidget(self.frame_surface)
-        self.frame_surface.setText("播放缓存已就绪；点击播放。")
-        self._seekFfmpegVideo(0, play_continuously=False)
+        self.position_slider.setRange(0, self.duration_ms)
+        self._setControlsEnabled(True)
+        self.status_label.setText("视频已载入")
+        self._seekFfmpeg(0, False)
 
-    def _stopFfmpegVideoWorker(self):
+    def _setControlsEnabled(self, enabled):
+        for widget in (self.play_button, self.back_button, self.forward_button, self.speed_combo, self.position_slider):
+            widget.setEnabled(enabled)
+
+    def togglePlayback(self):
+        if not self.play_button.isEnabled():
+            return
+        if self.backend == "ffmpeg":
+            if self.playing:
+                self.stopWorker()
+                self._setPlaying(False)
+            else:
+                position = 0 if self.position_ms >= self.duration_ms else self.position_ms
+                self._seekFfmpeg(position, True)
+        elif self.qt_player.state() == QtMultimedia.QMediaPlayer.PlayingState:
+            self.qt_player.pause()
+        else:
+            if self.qt_player.position() >= self.qt_player.duration():
+                self.qt_player.setPosition(0)
+            self.qt_player.play()
+
+    def seekBy(self, delta):
+        self.seek(self.position_ms + int(delta))
+
+    def seek(self, position):
+        if not self.position_slider.isEnabled():
+            return
+        target = min(max(0, int(position)), self.duration_ms)
+        if self.backend == "ffmpeg":
+            self._seekFfmpeg(target, self.playing)
+        else:
+            self.qt_player.setPosition(target)
+
+    def setPlaybackRate(self, _index):
+        rate = float(self.speed_combo.currentData())
+        if self.backend == "ffmpeg":
+            if self.playing:
+                self._seekFfmpeg(self.position_ms, True)
+        elif self.qt_player is not None:
+            self.qt_player.setPlaybackRate(rate)
+
+    def sliderPressed(self):
+        self.slider_dragging = True
+
+    def sliderMoved(self, position):
+        self._updateTime(position)
+
+    def sliderReleased(self):
+        self.slider_dragging = False
+        self.seek(self.position_slider.value())
+
+    def _seekFfmpeg(self, position, play):
+        self.stopWorker()
+        self.position_ms = min(max(0, int(position)), self.duration_ms)
+        self._setPlaying(play)
+        self.worker = FfmpegFrameWorker(
+            self.playback_path,
+            self.position_ms,
+            playback_rate=float(self.speed_combo.currentData()),
+            play_continuously=play,
+            parent=self,
+        )
+        self.worker.frameReady.connect(self._frameReady)
+        self.worker.playbackEnded.connect(self._playbackEnded)
+        self.worker.errorRaised.connect(self._workerError)
+        self.worker.start()
+
+    def _frameReady(self, image, position):
+        if self.sender() is not self.worker:
+            return
+        self.frame_pixmap = QPixmap.fromImage(image)
+        self._renderFrame()
+        self._positionChanged(position)
+
+    def _renderFrame(self):
+        if self.frame_pixmap is not None:
+            self.frame_surface.setPixmap(
+                self.frame_pixmap.scaled(
+                    self.frame_surface.size(),
+                    Qt.KeepAspectRatio,
+                    Qt.SmoothTransformation,
+                )
+            )
+
+    def eventFilter(self, watched, event):
+        if watched is self.frame_surface and event.type() == QEvent.Resize:
+            QTimer.singleShot(0, self._renderFrame)
+        return super().eventFilter(watched, event)
+
+    def _positionChanged(self, position):
+        if self.sender() is self.qt_player and self.backend != "qt":
+            return
+        self.position_ms = max(0, int(position))
+        if not self.slider_dragging:
+            self.position_slider.setValue(self.position_ms)
+            self._updateTime()
+
+    def _durationChanged(self, duration):
+        if self.backend == "qt":
+            self.duration_ms = max(0, int(duration))
+            self.position_slider.setRange(0, self.duration_ms)
+            self._updateTime()
+
+    def _stateChanged(self, state):
+        if self.backend == "qt":
+            self._setPlaying(state == QtMultimedia.QMediaPlayer.PlayingState)
+
+    def _setPlaying(self, playing):
+        self.playing = playing
+        self.play_button.setText("暂停" if playing else "播放")
+
+    def _updateTime(self, position=None):
+        self.time_label.setText(
+            f"{format_position(self.position_ms if position is None else position)} / "
+            f"{format_position(self.duration_ms)}"
+        )
+
+    def _mediaStatusChanged(self, status):
+        if self.backend != "qt":
+            return
+        if status == QtMultimedia.QMediaPlayer.LoadedMedia:
+            self.qt_player.setPlaybackRate(float(self.speed_combo.currentData()))
+            self._setControlsEnabled(True)
+            self.status_label.setText("视频已载入")
+        elif status == QtMultimedia.QMediaPlayer.InvalidMedia:
+            self._playerError()
+
+    def _playerError(self, *_args):
+        if self.backend == "qt":
+            self._setControlsEnabled(False)
+            self._setPlaying(False)
+            self.status_label.setText(f"视频播放失败：{self.qt_player.errorString().strip()}")
+
+    def _workerError(self, message):
+        if self.sender() is self.worker:
+            self._setPlaying(False)
+            self.status_label.setText(f"视频播放失败：{message}")
+
+    def _playbackEnded(self):
+        if self.sender() is self.worker:
+            if self.playing:
+                self._positionChanged(self.duration_ms)
+            self._setPlaying(False)
+
+    def stopWorker(self):
         worker = self.worker
         self.worker = None
         if worker is not None:
             worker.stop()
-            worker.wait(500)
+            worker.wait(3000)
 
-    def _seekFfmpegVideo(self, position_ms: int, play_continuously: bool):
-        if not self.playback_path:
-            return
-        target = min(max(0, int(position_ms)), self.duration_ms)
-        self._stopFfmpegVideoWorker()
-        self.position_ms = target
-        self.playing = bool(play_continuously)
-        worker = FfmpegFrameWorker(
-            self.playback_path,
-            target,
-            playback_rate=float(self.speed_combo.currentData() or 1.0),
-            play_continuously=bool(play_continuously),
-            parent=self,
-        )
-        worker.frameReady.connect(self._ffmpegVideoFrameReady)
-        worker.playbackEnded.connect(self._ffmpegVideoEnded)
-        worker.errorRaised.connect(lambda message: self.window.sync.video_sync_summary_label.setText(message))
-        self.worker = worker
-        worker.start()
-
-    def _ffmpegVideoFrameReady(self, image, position_ms: int):
-        if self.backend != "ffmpeg":
-            return
-        self.position_ms = min(max(0, int(position_ms)), self.duration_ms)
-        pixmap = QPixmap.fromImage(image)
-        if not pixmap.isNull():
-            self.frame_pixmap = pixmap
-            self._renderVideoFrame()
-        if not self.slider_dragging:
-            self.position_slider.setValue(self.position_ms)
-        self.window.sync._updateVideoTimeLabel(self.position_ms, self.duration_ms)
-        self.window.sync._updateVideoPlayhead(self.position_ms)
-
-    def _renderVideoFrame(self):
-        pixmap = self.frame_pixmap
-        if pixmap is None or pixmap.isNull() or not hasattr(self, "frame_surface"):
-            return
-        mode = self.fit_combo.currentData() if hasattr(self, "fit_combo") else Qt.KeepAspectRatio
-        self.frame_surface.setPixmap(
-            pixmap.scaled(
-                self.frame_surface.size(),
-                mode,
-                Qt.SmoothTransformation,
-            )
-        )
-
-    def setVideoFitMode(self, _index: int):
-        mode = self.fit_combo.currentData()
-        if QVideoWidget is not None and isinstance(self.surface, QVideoWidget):
-            self.surface.setAspectRatioMode(mode)
-        self._renderVideoFrame()
-
-    def eventFilter(self, watched, event):
-        if (
-            hasattr(self.window.video_ui, "annotation_sidebar_widget")
-            and watched is self.window.video_ui.annotation_sidebar_widget
-            and event.type() == QEvent.Resize
-        ):
-            # A small window gives more height to labels; a wide sidebar gives
-            # the video its natural aspect ratio, within a modest height cap.
-            height = min(
-                240,
-                max(
-                    130,
-                    int(min((watched.width() - 12) * 9 / 16, watched.height() * 0.22)),
-                ),
-            )
-            if self.viewport.height() != height:
-                self.viewport.setFixedHeight(height)
-        if hasattr(self, "frame_surface") and watched is self.frame_surface and event.type() == QEvent.Resize:
-            QTimer.singleShot(0, self._renderVideoFrame)
-        return super().eventFilter(watched, event)
-
-    def _ffmpegVideoEnded(self):
-        if self.backend != "ffmpeg":
-            return
-        self.playing = False
-        self.play_button.setText("播放")
-
-    def toggleVideoPlayback(self):
-        if self.window.annotations.annotation_canvas is not None and self.window.annotations.annotation_canvas.busy:
-            self.window.annotations.annotation_canvas.cancel()
-        if self.backend == "ffmpeg":
-            if self.playing:
-                self.playing = False
-                self._stopFfmpegVideoWorker()
-                self.play_button.setText("播放")
-            else:
-                self._seekFfmpegVideo(self.position_ms, play_continuously=True)
-                self.play_button.setText("暂停")
-            return
-        if self.qt_player is None or not self.window.annotations.video_annotation_project.video_path:
-            return
-        if self.qt_player.state() == QtMultimedia.QMediaPlayer.PlayingState:
-            self.qt_player.pause()
-        else:
-            self.qt_player.play()
-
-    def seekVideoByMilliseconds(self, delta: int):
-        if self.backend == "ffmpeg":
-            self._seekFfmpegVideo(self.position_ms + int(delta), self.playing)
-            return
-        if self.qt_player is None:
-            return
-        maximum = max(0, self.qt_player.duration())
-        target = min(max(0, self.qt_player.position() + int(delta)), maximum)
-        self.qt_player.setPosition(target)
-        self.window.sync._updateVideoPlayhead(target, force=True)
-
-    def setVideoPlaybackRate(self, _index: int):
-        if self.backend == "ffmpeg" and self.playing:
-            self._seekFfmpegVideo(self.position_ms, play_continuously=True)
-            return
+    def shutdown(self):
+        self.conversion_timer.stop()
+        self.stopWorker()
         if self.qt_player is not None:
-            self.qt_player.setPlaybackRate(float(self.speed_combo.currentData() or 1.0))
-
-    def _videoSliderPressed(self):
-        self.slider_dragging = True
-
-    def _videoSliderMoved(self, value: int):
-        self.window.sync._updateVideoTimeLabel(value, self.position_slider.maximum())
-        self.window.sync._updateVideoPlayhead(value, force=True)
-
-    def _videoSliderReleased(self):
-        self.slider_dragging = False
-        if self.backend == "ffmpeg":
-            self._seekFfmpegVideo(self.position_slider.value(), self.playing)
-            self.window.sync._updateVideoPlayhead(self.position_slider.value(), force=True)
-            return
-        if self.qt_player is not None:
-            self.qt_player.setPosition(self.position_slider.value())
-        self.window.sync._updateVideoPlayhead(self.position_slider.value(), force=True)
-
-    def _videoDurationChanged(self, duration: int):
-        if duration <= 0 and self.probe is not None and self.probe.duration_seconds:
-            duration = int(round(self.probe.duration_seconds * 1000.0))
-        self.position_slider.setRange(0, max(0, int(duration)))
-        self.window.sync._updateVideoTimeLabel(
-            self.qt_player.position() if self.qt_player else 0,
-            duration,
-        )
-
-    def _videoStateChanged(self, state):
-        self.play_button.setText("暂停" if state == QtMultimedia.QMediaPlayer.PlayingState else "播放")
-
-    def _videoMediaStatusChanged(self, status):
-        if status == QtMultimedia.QMediaPlayer.LoadedMedia:
-            playback = "MPEG-PS 缓存副本" if self.probe and self.probe.is_mpeg_program_stream else "源文件"
-            self.window.sync.video_sync_summary_label.setText(
-                f"视频已载入（{playback}）；当前时间会同步到下方 DAS 竖线。"
-            )
-        elif status == QtMultimedia.QMediaPlayer.InvalidMedia:
-            self.window.sync.video_sync_summary_label.setText(
-                "当前 Windows 媒体后端仍无法播放该编码；源文件未被修改。"
-                "请安装可用的 FFmpeg 后端或使用兼容的 H.264/AAC 缓存转码。"
-            )
-
-    def _videoPlayerError(self, *_args):
-        if self.qt_player is not None:
-            details = self.qt_player.errorString().strip()
-            if details:
-                self.window.sync.video_sync_summary_label.setText(f"视频播放失败：{details}")
+            self.qt_player.stop()
+        self.conversion_executor.shutdown(wait=False, cancel_futures=True)

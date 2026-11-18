@@ -12,6 +12,12 @@
         <AppIcon :name="view.icon" />{{ view.label }}
       </button>
     </div>
+    <button class="annotation-toggle" :aria-pressed="detailedAnnotations" @click="detailedAnnotations = !detailedAnnotations">
+      <AppIcon name="layers" />{{ detailedAnnotations ? '收起工程标注' : '工程标注' }}
+    </button>
+    <div v-if="!detailedAnnotations" class="fiber-legend" aria-label="光纤图例">
+      <span><i class="das" />DAS 声学</span><span><i class="dss" />DSS 应变</span><span><i class="comm" />通信光缆</span>
+    </div>
     <div v-if="!ready && !error" class="scene-indicators">
       <span
         ><i class="online-dot" />{{
@@ -78,12 +84,14 @@ const emit = defineEmits<{ visual: [patch: Partial<VisualState>] }>();
 const container = ref<HTMLElement | null>(null),
   selection = ref<Record<string, unknown> | null>(null),
   activeView = ref("overview");
+const detailedAnnotations = ref(false);
 const scene = useMonitoringScene(
   container,
   () => props.visual,
   (value) => (selection.value = value),
 );
 const { ready, error, notice } = scene;
+watch(() => [detailedAnnotations.value, ready.value], () => scene.setAnnotationsDetailed(detailedAnnotations.value));
 const store = useMonitoringStore();
 const selectedFiber = computed(
   () =>

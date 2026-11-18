@@ -10,6 +10,8 @@ export class SceneAnnotations {
   private root:HTMLDivElement;
   private leaders:SVGSVGElement;
   private viewport='';
+  private detailed=false;
+  setDetailed(value:boolean):void { this.detailed=value; }
   private reserved:Rect[]=[];
   constructor(container:HTMLElement){
     this.root=document.createElement('div');this.root.className='scene-annotations';
@@ -19,7 +21,7 @@ export class SceneAnnotations {
   add(text:string,position:THREE.Vector3,owner:THREE.Object3D,tone='cyan',offset=-25,offsetX=0,placement?:{dock:Dock;rank?:number}):void {
     const element=document.createElement('div');element.className='scene-annotation '+tone;element.textContent=text;this.root.appendChild(element);
     const leader=document.createElementNS('http://www.w3.org/2000/svg','path');
-    leader.setAttribute('fill','none');leader.setAttribute('stroke-width','1.5');
+    leader.setAttribute('fill','none');leader.setAttribute('stroke-width','1');leader.setAttribute('opacity','.5');
     leader.setAttribute('stroke',({red:'#ff6565',green:'#3afc8f',amber:'#ffbc48',purple:'#bc92ff'} as Record<string,string>)[tone]??'#54dbff');
     this.leaders.appendChild(leader);
     this.labels.push({element,position,owner,offset,offsetX,leader,dock:placement?.dock,rank:placement?.rank??0,width:0,height:0});
@@ -37,7 +39,7 @@ export class SceneAnnotations {
       this.labels.forEach(label=>{label.element.hidden=false});
       this.labels.forEach(label=>{label.width=label.element.offsetWidth||130;label.height=label.element.offsetHeight||32});
       const bounds=this.root.getBoundingClientRect();
-      this.reserved=[...this.root.parentElement!.parentElement!.querySelectorAll('.scene-view-tabs,.scene-playback')].map(element=>{
+      this.reserved=[...this.root.parentElement!.parentElement!.querySelectorAll('.scene-view-tabs,.scene-playback,.annotation-toggle,.fiber-legend')].map(element=>{
         const box=element.getBoundingClientRect();return {x:box.left-bounds.left,y:box.top-bounds.top,w:box.width,h:box.height};
       });
     }
@@ -46,7 +48,7 @@ export class SceneAnnotations {
       let owner:THREE.Object3D|null=label.owner,visible=true;
       while(owner){if(!owner.visible)visible=false;owner=owner.parent}
       const point=label.position.clone().project(camera);
-      let hidden=!visible||(lookingDown&&label.position.y<0)||label.owner.userData.labelVisible===false||point.z>1||point.z< -1||Math.abs(point.x)>1.15||Math.abs(point.y)>1.12;
+      let hidden=(!this.detailed&&!label.owner.userData.eventId)||!visible||(lookingDown&&label.position.y<0)||label.owner.userData.labelVisible===false||point.z>1||point.z< -1||Math.abs(point.x)>1.15||Math.abs(point.y)>1.12;
       const anchorX=(point.x+1)*width/2,anchorY=(1-point.y)*height/2;
       let x=anchorX+label.offsetX,y=anchorY+label.offset;
       if(label.dock==='left'){x=18;y=height*(.50+label.rank*.1)-label.height/2}

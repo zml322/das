@@ -41,6 +41,7 @@ export class SceneManager {
   private disposed = false;
   private viewportWidth = 0;
   private viewportHeight = 0;
+  private resizePending = false;
   private environmentTarget?: THREE.WebGLRenderTarget;
   private clickHandler = (event: MouseEvent) => this.onMouseClick(event);
   private moveHandler = (event: MouseEvent) => this.onMouseMove(event);
@@ -76,6 +77,9 @@ export class SceneManager {
     this.renderer = new THREE.WebGLRenderer({
       antialias: true,
       alpha: false,
+      // Qt WebEngine can composite DOM changes between our throttled WebGL frames.
+      // Keep the last completed image available until the next render replaces it.
+      preserveDrawingBuffer: true,
       powerPreference: "high-performance",
     });
     this.renderer.setClearAlpha(1);
@@ -129,7 +133,9 @@ export class SceneManager {
   }
   private setupResizeObserver(): void {
     this.resizeObserver = new ResizeObserver(() => {
-      this.handleResize();
+      // setSize clears the drawing buffer. Resize and redraw in the same callback,
+      // rather than exposing a cleared canvas while waiting for the next frame.
+      this.resizePending = true;
     });
     this.resizeObserver.observe(this.container);
   }
@@ -208,12 +214,18 @@ export class SceneManager {
   private animate = (): void => {
     if (this.disposed) return;
     this.animationId = requestAnimationFrame(this.animate);
-    const now = performance.now();
+    this.renderFrame(performance.now());
+  };
+  private renderFrame(now: number): void {
     if (document.hidden || now - this.lastFrame < 1000 / 30) return;
     const delta = this.lastFrame
       ? Math.min((now - this.lastFrame) / 1000, 0.1)
       : 0;
     this.lastFrame = now;
+    if (this.resizePending) {
+      this.resizePending = false;
+      this.handleResize();
+    }
     this.effectClock.advance(delta, this.visualState, document.hidden);
     updateVisuals(this.scene, this.effectClock.time, this.visualState);
     this.cameraController.update(delta);
@@ -224,7 +236,7 @@ export class SceneManager {
       this.container.clientWidth,
       this.container.clientHeight,
     );
-  };
+  }
   setVisualState(patch: Partial<VisualState>): void {
     this.visualState = { ...this.visualState, ...patch };
     this.visualState.speed = Math.max(0, Math.min(3, this.visualState.speed));

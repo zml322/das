@@ -53,8 +53,9 @@ class WorkspaceController(WindowFeature):
     def initMainWindow(self):
         """获取屏幕分辨率，设置主窗口初始大小"""
         screen = QApplication.desktop()
-        screen_height = int(screen.screenGeometry().height() * 0.8)
-        screen_width = int(screen.screenGeometry().width() * 0.8)
+        # 直接取最大窗口使用
+        screen_height = int(screen.screenGeometry().height())
+        screen_width = int(screen.screenGeometry().width())
         self.window.resize(screen_width, screen_height)
 
     def initUI(self):
@@ -70,7 +71,6 @@ class WorkspaceController(WindowFeature):
             except (AttributeError, OSError):
                 # 任务栏图标设置失败不应影响主程序启动。
                 pass
-
     def initLayout(self):
         """初始化主窗口布局"""
         main_window_widget = QWidget()
@@ -304,7 +304,7 @@ class WorkspaceController(WindowFeature):
 
         # 绘制灰度图
         self.window.plots.plot_gray_scale_widget = MyPlotWidget(
-            "", "推算时间", "通道", check_mouse=False, time_axis=True
+            "", "时间", "通道", check_mouse=False, time_axis=True
         )
         self.window.plots.gray_scale_container = QWidget()
         gray_scale_vbox = QVBoxLayout()
@@ -348,8 +348,8 @@ class WorkspaceController(WindowFeature):
         self.tab_widget.addTab(combine_image_widget, "单通道")
         self.window.waves.initMultiWavesTab()
         self.tab_widget.addTab(self.window.waves.multi_waves_container, "多通道云图")
-        self.window.video_ui.initVideoComparisonTab()
-        self.tab_widget.addTab(self.window.video_ui.video_compare_container, "视频对照")
+        self.window.video_ui.createPage()
+        self.tab_widget.addTab(self.window.video_ui.video_container, "视频播放")
         self.tab_widget.tabBar().setTabButton(0, QTabBar.RightSide, None)
         self.tab_widget.tabBar().setTabButton(1, QTabBar.RightSide, None)  # 设置删除按钮消失
         self.tab_widget.tabBar().setTabButton(2, QTabBar.RightSide, None)
@@ -420,7 +420,6 @@ class WorkspaceController(WindowFeature):
         self.sidebar_tabs.setMinimumWidth(380)
         self.sidebar_tabs.addTab(self.window.data.data_sidebar_widget, "数据")
         self.sidebar_tabs.addTab(self.window.filtering.filter_sidebar_widget, "二维滤波")
-        self.sidebar_tabs.addTab(self.window.video_ui.annotation_sidebar_widget, "标注")
         self.sidebar_tabs.currentChanged.connect(self._sidebarTabChanged)
 
         content_widget = QWidget()
@@ -466,64 +465,22 @@ class WorkspaceController(WindowFeature):
             event.ignore()
 
     def keyPressEvent(self, event):
-        """Expose visible video-label shortcuts without hijacking text editors."""
-
         focus = QApplication.focusWidget()
-        if focus is not None and any(
-            focus.inherits(name) for name in ("QLineEdit", "QAbstractSpinBox", "QComboBox", "QTableWidget")
-        ):
-            QMainWindow.keyPressEvent(self.window, event)
+        editing = focus is not None and any(
+            focus.inherits(name) for name in ("QLineEdit", "QAbstractSpinBox", "QComboBox")
+        )
+        if not editing and self.tab_widget.currentWidget() is self.window.video_ui.video_container:
+            if event.key() == Qt.Key_Space:
+                self.window.playback.togglePlayback()
+            elif event.key() == Qt.Key_Left:
+                self.window.playback.seekBy(-1000)
+            elif event.key() == Qt.Key_Right:
+                self.window.playback.seekBy(1000)
+            else:
+                QMainWindow.keyPressEvent(self.window, event)
+                return
+            event.accept()
             return
-        if (
-            hasattr(self, "tab_widget")
-            and self.tab_widget.currentWidget() is self.window.video_ui.video_compare_container
-        ):
-            key = event.key()
-            if event.modifiers() & Qt.ControlModifier and key == Qt.Key_Z:
-                if event.modifiers() & Qt.ShiftModifier:
-                    self.window.annotations.redoVideoAnnotation()
-                else:
-                    self.window.annotations.undoLastVideoAnnotation()
-                event.accept()
-                return
-            if event.modifiers() & Qt.ControlModifier and key == Qt.Key_S:
-                self.window.annotations.saveVideoAnnotationProject()
-                event.accept()
-                return
-            shapes = {
-                Qt.Key_B: "bbox",
-                Qt.Key_R: "obb",
-                Qt.Key_K: "kp",
-                Qt.Key_L: "lin",
-            }
-            if key in shapes:
-                self.window.annotations._setAnnotationDrawingTool(shapes[key])
-                event.accept()
-                return
-            if key == Qt.Key_F11:
-                self.window.video_plot.video_focus_button.toggle()
-                event.accept()
-                return
-            if key == Qt.Key_Escape and self.window.video_plot._video_focus_mode:
-                self.window.video_plot.video_focus_button.setChecked(False)
-                event.accept()
-                return
-            if key == Qt.Key_Space:
-                self.window.playback.toggleVideoPlayback()
-                event.accept()
-                return
-            if key == Qt.Key_T:
-                self.window.annotations.addVideoPointAnnotation()
-                event.accept()
-                return
-            if key == Qt.Key_I:
-                self.window.annotations.beginVideoIntervalAnnotation()
-                event.accept()
-                return
-            if key == Qt.Key_O:
-                self.window.annotations.finishVideoIntervalAnnotation()
-                event.accept()
-                return
         QMainWindow.keyPressEvent(self.window, event)
 
     def removeTab(self, index: int):
@@ -548,20 +505,10 @@ class WorkspaceController(WindowFeature):
         if self.window.filtering.das_filter_dialog is None:
             QTimer.singleShot(0, self.window.filtering.showDASFilterDialog)
 
-    def _workspaceTabChanged(self, _index: int):
-        """Pair the video workspace with its visible video/annotation sidebar."""
-
-        video_active = self.tab_widget.currentWidget() is self.window.video_ui.video_compare_container
+    def _workspaceTabChanged(self, _index):
+        video_active = self.tab_widget.currentWidget() is self.window.video_ui.video_container
         self.window.overlays.event_range_widget.setVisible(not video_active)
-        if video_active:
-            if not self.window.video_plot._video_focus_mode:
-                self.sidebar_tabs.setVisible(True)
-                self.sidebar_tabs.setCurrentWidget(self.window.video_ui.annotation_sidebar_widget)
-            return
-        if self.window.video_plot._video_focus_mode:
-            self.window.video_plot.video_focus_button.setChecked(False)
-        if self.window.annotations.annotation_canvas is not None:
-            self.window.annotations.annotation_canvas.cancel()
+        self.sidebar_tabs.setVisible(not video_active)
 
     def _rememberSidebarWidth(self, _position: int, _index: int):
         if not self.sidebar_tabs.isVisible():

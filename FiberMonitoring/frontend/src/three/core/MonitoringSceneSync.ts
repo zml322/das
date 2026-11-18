@@ -81,7 +81,7 @@ function syncEvents(
         const levels = ["critical", "high", "medium", "low"];
         return levels.indexOf(a.severity) - levels.indexOf(b.severity);
       })
-      .slice(0, 3)
+      .slice(0, 1)
       .map((event) => event.eventId),
   );
   for (const marker of [...groups.markerGroup.children]) {

@@ -155,7 +155,7 @@
   border: 1px solid #38bce9;
   border-radius: 5px;
   color: #b8f0ff;
-  font-size: max(11px, calc(22 * var(--ui-unit)));
+  font-size: max(11px, calc(18 * var(--ui-unit)));
   box-shadow: 0 0 10px #16a1e133;
 }
 .scene-annotation:after {
@@ -210,7 +210,7 @@
   background: #112331e8;
   color: #d4e5ed;
   border-color: #5c8fad;
-  font-size: max(11px, calc(21 * var(--ui-unit)));
+  font-size: max(11px, calc(17 * var(--ui-unit)));
   padding: calc(6 * var(--ui-unit)) calc(10 * var(--ui-unit));
 }
 .scene-annotation.soil:after {
@@ -220,3 +220,11 @@
   width: 13px;
   height: 1px;
 }
+
+.annotation-toggle { position: absolute; top: 14px; right: 14px; z-index: 3; display: flex; align-items: center; gap: 6px; padding: 8px 10px; min-height: 32px; border: 1px solid #377ca7 !important; border-radius: 6px; background: #041a34e6 !important; color: #c9dfef; font-size: 12px; }
+.annotation-toggle[aria-pressed="true"] { color: #55e2ff; }
+.fiber-legend { position: absolute; right: 14px; bottom: 14px; display: flex; gap: 12px; padding: 8px 12px; border-radius: 6px; background: #041a34de; color: #c9dfef; font-size: 11px; pointer-events: none; }
+.fiber-legend span { display: flex; align-items: center; gap: 6px; }
+.fiber-legend i { width: 14px; height: 3px; border-radius: 2px; }
+.fiber-legend .das { background: #ff393d; }.fiber-legend .dss { background: #00baff; }.fiber-legend .comm { background: #16ed72; }
+@media (max-width: 1450px) { .annotation-toggle { top: 58px; } }

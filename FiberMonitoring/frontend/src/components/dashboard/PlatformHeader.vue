@@ -11,7 +11,8 @@
       <button
         v-for="item in navigation"
         :key="item.label"
-        :class="{ active: item.label === active }"
+        :class="{ active: isActive(item.path) }"
+        :aria-current="isActive(item.path) ? 'page' : undefined"
         @click="navigate(item)"
       >
         <AppIcon :name="item.icon" /><span>{{ item.label }}</span>
@@ -20,7 +21,7 @@
     <div class="header-actions">
       <button aria-label="查看告警" @click="$router.push('/events')">
         <AppIcon name="bell" /><b>{{ alarms }}</b></button
-      ><span class="avatar" aria-hidden="true"><svg viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="8" r="4" /><path d="M4 22v-3a8 8 0 0 1 16 0v3" /></svg></span><span class="administrator">管理员<span aria-hidden="true">⌄</span></span
+      ><span class="avatar" aria-hidden="true"><svg viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="8" r="4" /><path d="M4 22v-3a8 8 0 0 1 16 0v3" /></svg></span><span class="administrator">管理员</span
       ><button aria-label="切换全屏" @click="fullscreen">
         <AppIcon name="expand" />
       </button>
@@ -35,15 +36,18 @@
   </header>
 </template>
 <script setup lang="ts">
-import { ref } from "vue";
-import { useRouter } from "vue-router";
+import { useRoute, useRouter } from "vue-router";
 import AppIcon from "./AppIcon.vue";
 import { useDesktopWindow } from "@/composables/useDesktopWindow";
 const { desktop, minimize, maximize, close, move } = useDesktopWindow();
 defineProps<{ alarms: number }>();
 const emit = defineEmits<{ settings: []; scene: [] }>();
-const router = useRouter(),
-  active = ref("首页");
+const router = useRouter();
+const route = useRoute();
+function isActive(path: string) {
+  if (path === "scene") return route.path === "/" && route.query.view === "scene";
+  return route.path === path && (path !== "/" || !route.query.view);
+}
 const navigation = [
   { label: "首页", icon: "home", path: "/" },
   { label: "三维监测", icon: "cube", path: "scene" },
@@ -54,12 +58,14 @@ const navigation = [
 ];
 function navigate(item: (typeof navigation)[number]) {
   if (item.path === "settings") {
-    emit("settings");
-    return;
-  }
-  active.value = item.label;
-  if (item.path === "scene") emit("scene");
-  else router.push(item.path);
+    if (route.path === "/") emit("settings");
+    else router.push({ path: "/", query: { panel: "settings" } });
+  } else if (item.path === "scene") {
+    if (route.path === "/") {
+      router.replace({ path: "/", query: { view: "scene" } });
+      emit("scene");
+    } else router.push({ path: "/", query: { view: "scene" } });
+  } else router.push(item.path);
 }
 function fullscreen() {
   if (document.fullscreenElement) document.exitFullscreen();

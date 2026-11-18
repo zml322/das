@@ -2,7 +2,7 @@
 
 from PyQt5.QtWidgets import QApplication, QMainWindow
 
-from services.preferences import AppPreferences
+from configs.preferences import AppPreferences
 from ui.components.data_controls import DataControlsController
 from ui.components.plot_overlays import PlotOverlaysController
 from ui.components.workspace import WorkspaceController
@@ -11,13 +11,8 @@ from ui.tabs.data_plots import DataPlotsController
 from ui.tabs.filtering import FilteringController
 from ui.tabs.multi_waves import MultiWavesController
 from ui.tabs.vehicle_analysis import VehicleAnalysisController
-from ui.tabs.video_analysis import VideoAnalysisController
-from ui.tabs.video_annotations import VideoAnnotationsController
-from ui.tabs.video_files import VideoFilesController
 from ui.tabs.video_layout import VideoLayoutController
 from ui.tabs.video_playback import VideoPlaybackController
-from ui.tabs.video_plot import VideoPlotController
-from ui.tabs.video_sync import VideoSyncController
 
 
 class MainWindow(QMainWindow):
@@ -35,12 +30,7 @@ class MainWindow(QMainWindow):
         self.vehicles = VehicleAnalysisController(self)
         self.filtering = FilteringController(self)
         self.video_ui = VideoLayoutController(self)
-        self.video_files = VideoFilesController(self)
         self.playback = VideoPlaybackController(self)
-        self.sync = VideoSyncController(self)
-        self.annotations = VideoAnnotationsController(self)
-        self.video_analysis = VideoAnalysisController(self)
-        self.video_plot = VideoPlotController(self)
         self.workspace.initMainWindow()
         self.plots.configurePlotDefaults()
         self.workspace.initUI()
@@ -62,7 +52,6 @@ class MainWindow(QMainWindow):
         self.plots.plotSingleChannelTime()
         self.plots.plotAmplitudeFrequency()
         self.waves.plotMultiWavesImage()
-        self.video_plot.plotVideoComparisonImage()
 
     def updateAll(self):
         self.data.updateWidgetsState()
@@ -71,8 +60,6 @@ class MainWindow(QMainWindow):
         self.data.updateDataRange()
         self.data.updateDataParams()
         self.data.updateDataGPSTime()
-        self.sync.updateVideoAnnotationDataContext()
-        self.annotations.refreshVideoAnnotationTable(select_identifier=self.annotations.video_annotation_selected_id)
         self.updateImages()
 
     def closeEvent(self, event):
@@ -83,6 +70,4 @@ class MainWindow(QMainWindow):
 
     def shutdown(self):
         """Ask each feature to release its own resources."""
-        self.video_ui.shutdown()
         self.playback.shutdown()
-        self.video_analysis.shutdown()
